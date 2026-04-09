@@ -239,6 +239,22 @@ def batch_cmd(video_dir: str, output: str, model_complexity: int) -> None:
     print_summary(df)
 
 
+@main.command("web")
+@click.option(
+    "--port",
+    default=8200,
+    show_default=True,
+    type=click.IntRange(1024, 65535),
+    help="Port to serve the Streamlit web interface on.",
+)
+def web_cmd(port: int) -> None:
+    """Launch the Streamlit web interface for video upload and analysis."""
+    from .web_app import run
+
+    click.echo(f"Starting Athlete Vision web interface on http://localhost:{port}")
+    run(port)
+
+
 @main.command("report")
 @click.option(
     "--csv",
