@@ -12,8 +12,10 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from .arm_analyzer import analyze_arm_swing
 from .pose_estimator import PoseEstimator
 from .stride_analyzer import analyze_strides
+from .velocity_analyzer import analyze_velocity
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
 
@@ -230,6 +232,9 @@ def process_single_video(
         "left_arm_swing_amplitude": float("nan"),
         "right_arm_swing_amplitude": float("nan"),
         "arm_swing_amplitude": float("nan"),
+        "arm_swing_symmetry": float("nan"),
+        "cross_body_swing": False,
+        "peak_velocity_mph": float("nan"),
     }
 
     try:
@@ -249,8 +254,20 @@ def process_single_video(
         result.update(calculate_velocity(df))
         result.update(calculate_arm_swing(df))
 
+        arm_metrics = analyze_arm_swing(df)
+        result["arm_swing_symmetry"] = arm_metrics["arm_swing_symmetry"]
+        result["cross_body_swing"] = arm_metrics["cross_body_swing"]
+
+        vel_metrics = analyze_velocity(df)
+        result["peak_velocity_mph"] = vel_metrics["peak_velocity_mph"]
+
         t = _extract_40_time(df)
-        result["extracted_40_time"] = t if t is not None else float("nan")
+        forty_from_vel = vel_metrics["forty_time"]
+        # Prefer the velocity-analyzer estimate when available
+        if not math.isnan(forty_from_vel):
+            result["extracted_40_time"] = forty_from_vel
+        else:
+            result["extracted_40_time"] = t if t is not None else float("nan")
 
         # Flag implausible stride lengths for review
         sl = result["stride_length_m"]
