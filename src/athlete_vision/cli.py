@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 import pandas as pd
 
+from .batch_processor import batch_process, generate_html_report, print_summary
 from .pose_estimator import PoseEstimator
 from .video_downloader import SEARCH_QUERIES, search_and_download
 
@@ -192,3 +193,75 @@ def download_cmd(count: int, output_dir: str, model_complexity: int) -> None:
             )
     else:
         click.echo("No videos with known 40-yard dash times found in titles.")
+
+
+@main.command("batch")
+@click.option(
+    "--video-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, readable=True),
+    help="Directory containing video files to process.",
+)
+@click.option(
+    "--output",
+    default="dataset.csv",
+    show_default=True,
+    type=click.Path(writable=True),
+    help="Path for the output CSV dataset.",
+)
+@click.option(
+    "--model-complexity",
+    default=1,
+    show_default=True,
+    type=click.IntRange(0, 2),
+    help="MediaPipe model complexity (0=lite, 1=full, 2=heavy).",
+)
+def batch_cmd(video_dir: str, output: str, model_complexity: int) -> None:
+    """Batch process videos and validate extracted 40-yard dash times.
+
+    Runs pose estimation, stride analysis, angle calculations, velocity, and
+    arm-swing analysis on every video in VIDEO_DIR.  Results are written to
+    OUTPUT as a CSV dataset and a full summary is printed to stdout.
+    Where metadata.json contains known 40 times, accuracy is reported.
+    """
+    video_dir_path = Path(video_dir)
+    output_path = Path(output)
+
+    click.echo(f"Processing videos in {video_dir_path} ...")
+
+    try:
+        df = batch_process(video_dir_path, output_path, model_complexity)
+    except FileNotFoundError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    click.echo(f"\nDataset written -> {output_path}  ({len(df)} row(s))")
+    print_summary(df)
+
+
+@main.command("report")
+@click.option(
+    "--csv",
+    "csv_path",
+    required=True,
+    type=click.Path(exists=True, readable=True),
+    help="Path to the batch CSV dataset produced by 'athlete-vision batch'.",
+)
+@click.option(
+    "--output",
+    default=None,
+    type=click.Path(writable=True),
+    help="Output HTML file path (default: <csv-name>.html).",
+)
+def report_cmd(csv_path: str, output: str | None) -> None:
+    """Generate a visual HTML report with charts from a batch CSV dataset."""
+    csv_p = Path(csv_path)
+    out_p = Path(output) if output else csv_p.with_suffix(".html")
+
+    df = pd.read_csv(csv_p)
+    if df.empty:
+        click.echo("CSV is empty — nothing to report.", err=True)
+        sys.exit(1)
+
+    generate_html_report(df, out_p)
+    click.echo(f"Report written -> {out_p}")
