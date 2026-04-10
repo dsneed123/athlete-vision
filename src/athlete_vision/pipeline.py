@@ -134,6 +134,7 @@ def process_video(
     video_path: Path,
     athlete_id: str,
     estimator: PoseEstimator,
+    calibration_factor: float = 1.0,
 ) -> tuple[dict, str, str | None]:
     """Run the full analysis pipeline on one video file.
 
@@ -145,6 +146,10 @@ def process_video(
         Identifier written into the ``athlete_id`` CSV column.
     estimator:
         An already-initialised :class:`PoseEstimator` instance.
+    calibration_factor:
+        Converts one normalised x-coordinate unit to metres.  Derive via
+        :func:`athlete_vision.calibration.calibrate`.  Default ``1.0`` returns
+        distance metrics in normalised units.
 
     Returns
     -------
@@ -162,7 +167,7 @@ def process_video(
             return row, "no_pose", None
 
         # --- Stride metrics ---
-        stride_metrics = analyze_strides(df)
+        stride_metrics = analyze_strides(df, calibration_factor=calibration_factor)
         row["stride_length"] = stride_metrics["stride_length"]
         row["stride_frequency"] = stride_metrics["stride_frequency"]
         row["ground_contact_ms"] = stride_metrics["ground_contact_ms"]
@@ -179,7 +184,7 @@ def process_video(
         row["arm_swing_symmetry"] = arm_metrics["arm_swing_symmetry"]
 
         # --- Velocity / 40-time ---
-        vel_metrics = analyze_velocity(df)
+        vel_metrics = analyze_velocity(df, calibration_factor=calibration_factor)
         row["peak_velocity_mph"] = vel_metrics["peak_velocity_mph"]
         forty = vel_metrics["forty_time"]
         if not math.isnan(forty) and _TIME_MIN <= forty <= _TIME_MAX:
@@ -199,6 +204,7 @@ def run_pipeline(
     output_csv: Path,
     model_complexity: int = 1,
     athlete_id: str | None = None,
+    calibration_factor: float = 1.0,
 ) -> tuple[pd.DataFrame, dict]:
     """Process all videos in *video_dir* through the full analysis pipeline.
 
@@ -213,6 +219,10 @@ def run_pipeline(
     athlete_id:
         Athlete identifier embedded in every CSV row.  Defaults to the
         video filename stem when ``None``.
+    calibration_factor:
+        Converts one normalised x-coordinate unit to metres.  Derive via
+        :func:`athlete_vision.calibration.calibrate`.  Default ``1.0`` returns
+        distance metrics in normalised units.
 
     Returns
     -------
@@ -242,7 +252,9 @@ def run_pipeline(
             aid = athlete_id if athlete_id is not None else video_path.stem
             print(f"  {video_path.name} ...", end="", flush=True)
 
-            row, status, error = process_video(video_path, aid, estimator)
+            row, status, error = process_video(
+                video_path, aid, estimator, calibration_factor=calibration_factor
+            )
 
             if status == "error":
                 print(f" [error: {error}]")

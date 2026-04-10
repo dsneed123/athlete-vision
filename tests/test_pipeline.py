@@ -275,7 +275,7 @@ class TestRunPipeline:
         for name in names:
             (directory / name).touch()
 
-    def _stub_process_video(self, video_path, athlete_id, estimator):
+    def _stub_process_video(self, video_path, athlete_id, estimator, **kwargs):
         """Minimal successful process_video stub."""
         return (
             {
@@ -341,7 +341,7 @@ class TestRunPipeline:
         self._write_videos(tmp_path, ["ok.mp4", "flagged.mp4", "err.mp4"])
         output = tmp_path / "out.csv"
 
-        def stub(video_path, athlete_id, estimator):
+        def stub(video_path, athlete_id, estimator, **kwargs):
             name = video_path.name
             if name == "ok.mp4":
                 row = self._stub_process_video(video_path, athlete_id, estimator)[0]
@@ -370,7 +370,7 @@ class TestRunPipeline:
 
         captured_ids: list[str] = []
 
-        def stub(video_path, athlete_id, estimator):
+        def stub(video_path, athlete_id, estimator, **kwargs):
             captured_ids.append(athlete_id)
             return self._stub_process_video(video_path, athlete_id, estimator)
 
@@ -386,7 +386,7 @@ class TestRunPipeline:
 
         captured_ids: list[str] = []
 
-        def stub(video_path, athlete_id, estimator):
+        def stub(video_path, athlete_id, estimator, **kwargs):
             captured_ids.append(athlete_id)
             return self._stub_process_video(video_path, athlete_id, estimator)
 
@@ -402,7 +402,7 @@ class TestRunPipeline:
 
         processed_names: list[str] = []
 
-        def stub(video_path, athlete_id, estimator):
+        def stub(video_path, athlete_id, estimator, **kwargs):
             processed_names.append(video_path.name)
             return self._stub_process_video(video_path, athlete_id, estimator)
 
@@ -418,7 +418,7 @@ class TestRunPipeline:
         self._write_videos(tmp_path, ["good.mp4", "bad.mp4"])
         output = tmp_path / "out.csv"
 
-        def stub(video_path, athlete_id, estimator):
+        def stub(video_path, athlete_id, estimator, **kwargs):
             if video_path.name == "bad.mp4":
                 row = {col: float("nan") for col in _OUTPUT_COLUMNS}
                 row["athlete_id"] = athlete_id
