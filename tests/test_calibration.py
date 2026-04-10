@@ -215,6 +215,160 @@ class TestDetectYardLines:
 
 
 # ---------------------------------------------------------------------------
+# detect_yard_lines — detailed line-filtering and clustering logic
+# ---------------------------------------------------------------------------
+
+def _cap_with_lines(
+    lines: np.ndarray | None,
+    frame_width: int = 1000,
+    frame_height: int = 1000,
+) -> MagicMock:
+    """Return a fully-mocked VideoCapture that reports *lines* via HoughLinesP."""
+    cap = _make_cap_mock(
+        frame_count=10.0,
+        frame_width=float(frame_width),
+        frame_height=float(frame_height),
+        frame=np.zeros((frame_height, frame_width, 3), dtype=np.uint8),
+    )
+    return cap
+
+
+class TestDetectYardLinesMocked:
+    """Tests that fully mock cv2 to exercise the geometry and clustering code."""
+
+    _GRAY = np.zeros((500, 1000), dtype=np.uint8)
+
+    def _patch_cv2(self, lines: np.ndarray | None, cap: MagicMock):
+        return (
+            patch("athlete_vision.calibration.cv2.VideoCapture", return_value=cap),
+            patch("athlete_vision.calibration.cv2.cvtColor", return_value=self._GRAY),
+            patch("athlete_vision.calibration.cv2.Canny", return_value=self._GRAY),
+            patch("athlete_vision.calibration.cv2.HoughLinesP", return_value=lines),
+        )
+
+    def test_two_clusters_correct_factor(self, tmp_path):
+        """Lines at x=0.20 and x=0.60 → spacing 0.40 → factor = 9.144/0.40."""
+        cap = _cap_with_lines(None)
+        lines = np.array([
+            [[200, 0, 200, 499]],   # near-vertical; x_mid = 200/1000 = 0.200
+            [[600, 0, 600, 499]],   # x_mid = 0.600
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4", cluster_tolerance=0.05)
+
+        assert result is not None
+        from athlete_vision.calibration import _TEN_YARDS_M
+        assert abs(result - _TEN_YARDS_M / 0.4) < 0.5
+
+    def test_three_clusters_uses_mean_spacing(self, tmp_path):
+        """Three yard lines at 0.2/0.5/0.8 → spacings [0.3, 0.3] → mean=0.3."""
+        cap = _cap_with_lines(None)
+        lines = np.array([
+            [[200, 0, 200, 499]],
+            [[500, 0, 500, 499]],
+            [[800, 0, 800, 499]],
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4", cluster_tolerance=0.05)
+
+        assert result is not None
+        from athlete_vision.calibration import _TEN_YARDS_M
+        assert abs(result - _TEN_YARDS_M / 0.3) < 0.5
+
+    def test_single_cluster_returns_none(self, tmp_path):
+        """Lines that merge into one cluster cannot yield a spacing."""
+        cap = _cap_with_lines(None)
+        # Two lines only 2 pixels apart → x_mid differ by 0.002 < cluster_tolerance 0.05
+        lines = np.array([
+            [[480, 0, 480, 499]],
+            [[482, 0, 482, 499]],
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4", cluster_tolerance=0.05)
+
+        assert result is None
+
+    def test_horizontal_lines_filtered_out(self, tmp_path):
+        """Lines with atan2(dx, dy) >= 20° are discarded."""
+        cap = _cap_with_lines(None)
+        # Near-horizontal: dx=800, dy=10 → angle ≈ 89° from vertical
+        lines = np.array([
+            [[0, 250, 800, 260]],
+            [[100, 250, 900, 260]],
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4")
+
+        assert result is None
+
+    def test_dy_zero_lines_ignored(self, tmp_path):
+        """Perfectly horizontal lines (dy=0) are skipped to avoid division by zero."""
+        cap = _cap_with_lines(None)
+        lines = np.array([
+            [[0, 250, 999, 250]],   # dy = 0
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4")
+
+        assert result is None
+
+    def test_hough_returns_none_gives_none(self, tmp_path):
+        """When HoughLinesP detects nothing, result is None."""
+        cap = _cap_with_lines(None)
+        p1, p2, p3, p4 = self._patch_cv2(None, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4")
+
+        assert result is None
+
+    def test_cap_released_after_successful_detection(self, tmp_path):
+        cap = _cap_with_lines(None)
+        lines = np.array([
+            [[200, 0, 200, 499]],
+            [[600, 0, 600, 499]],
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            detect_yard_lines(tmp_path / "v.mp4")
+
+        cap.release.assert_called_once()
+
+    def test_min_lines_parameter_respected(self, tmp_path):
+        """With min_lines=3, two clusters should not be enough to return a factor."""
+        cap = _cap_with_lines(None)
+        lines = np.array([
+            [[200, 0, 200, 499]],
+            [[600, 0, 600, 499]],
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4", min_lines=3, cluster_tolerance=0.05)
+
+        assert result is None
+
+    def test_nearly_vertical_line_accepted(self, tmp_path):
+        """Lines within 20° of vertical should pass the angle filter."""
+        cap = _cap_with_lines(None)
+        # Slightly angled: dx=5, dy=50 → angle = atan2(5,50) ≈ 5.7° < 20°
+        lines = np.array([
+            [[200, 0, 205, 50]],    # x_mid = (200+205)/2/1000 = 0.2025
+            [[600, 0, 605, 50]],    # x_mid ≈ 0.6025
+        ])
+        p1, p2, p3, p4 = self._patch_cv2(lines, cap)
+        with p1, p2, p3, p4:
+            result = detect_yard_lines(tmp_path / "v.mp4", cluster_tolerance=0.05)
+
+        # Should detect two clusters and return a factor
+        assert result is not None
+        assert result > 0.0
+
+
+# ---------------------------------------------------------------------------
 # calibrate — main entry point
 # ---------------------------------------------------------------------------
 
