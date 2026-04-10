@@ -254,7 +254,7 @@ class TestProcessSingleVideo:
     def test_ok_status_for_valid_video(self, tmp_path):
         video = tmp_path / "sample.mp4"
         video.touch()
-        df = _make_pose_df()
+        df = _make_pose_df(n_frames=100)
         mock_cm = self._make_stub_process(df)
 
         with patch("athlete_vision.batch_processor.PoseEstimator", return_value=mock_cm):
@@ -292,7 +292,7 @@ class TestProcessSingleVideo:
     def test_result_has_all_metric_keys(self, tmp_path):
         video = tmp_path / "full.mp4"
         video.touch()
-        df = _make_pose_df()
+        df = _make_pose_df(n_frames=100)
         mock_cm = self._make_stub_process(df)
 
         with patch("athlete_vision.batch_processor.PoseEstimator", return_value=mock_cm):
@@ -322,7 +322,7 @@ class TestProcessSingleVideo:
     def test_flagged_status_for_tiny_stride(self, tmp_path):
         video = tmp_path / "tiny.mp4"
         video.touch()
-        df = _make_pose_df()
+        df = _make_pose_df(n_frames=100)
         mock_cm = self._make_stub_process(df)
 
         # Patch analyze_strides to return an implausibly small stride length
@@ -345,7 +345,7 @@ class TestBatchProcess:
         for name in names:
             (directory / name).touch()
 
-    def _stub_process_single(self, video_path, metadata, model_complexity=1):
+    def _stub_process_single(self, video_path, metadata, model_complexity=1, **kwargs):
         return {
             "video": video_path.name,
             "athlete": metadata.get("athlete_name"),
@@ -402,7 +402,7 @@ class TestBatchProcess:
 
         captured = {}
 
-        def stub(video_path, meta, model_complexity=1):
+        def stub(video_path, meta, model_complexity=1, **kwargs):
             captured["meta"] = meta
             return self._stub_process_single(video_path, meta, model_complexity)
 
@@ -420,7 +420,7 @@ class TestBatchProcess:
 
         captured = {}
 
-        def stub(video_path, meta, model_complexity=1):
+        def stub(video_path, meta, model_complexity=1, **kwargs):
             captured["meta"] = meta
             return self._stub_process_single(video_path, meta, model_complexity)
 

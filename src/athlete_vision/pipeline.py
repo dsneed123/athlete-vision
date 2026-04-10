@@ -79,24 +79,29 @@ def _check_data_quality(
     df: pd.DataFrame,
     video_path: Path,
     has_implausible_metric: bool = False,
+    *,
+    min_frames: int = _MIN_FRAMES,
+    max_tracking_loss_ratio: float = _MAX_TRACKING_LOSS_RATIO,
+    min_avg_confidence: float = _MIN_CONFIDENCE,
+    aspect_tolerance: float = _ASPECT_TOLERANCE,
 ) -> str:
     """Return a quality string beginning with ``'REVIEW'`` or ``'OK'``.
 
     Criteria that trigger REVIEW (any one is sufficient):
 
-    * Fewer than 100 frames — video too short for reliable analysis.
-    * More than 10 % of frames have a critical joint (hip / knee / ankle)
-      with NaN x-coordinate — tracking was lost too often.
-    * Average visibility on critical joints falls below 85 % — low
-      MediaPipe confidence on the most important landmarks.
-    * Video aspect ratio is not within 15 % of 16:9, 4:3, or 3:2 —
-      portrait or unusual framing may distort pose geometry.
+    * Fewer than *min_frames* frames — video too short for reliable analysis.
+    * More than *max_tracking_loss_ratio* of frames have a critical joint
+      (hip / knee / ankle) with NaN x-coordinate — tracking was lost too often.
+    * Average visibility on critical joints falls below *min_avg_confidence* —
+      low MediaPipe confidence on the most important landmarks.
+    * Video aspect ratio is not within *aspect_tolerance* of 16:9, 4:3, or 3:2
+      — portrait or unusual framing may distort pose geometry.
 
     When *has_implausible_metric* is ``True`` (any stride or velocity metric
     was outside its plausible bounds and was set to NaN by the analyser),
     ``'|IMPLAUSIBLE_METRIC'`` is appended to the returned string.
     """
-    if len(df) < _MIN_FRAMES:
+    if len(df) < min_frames:
         quality = "REVIEW"
     else:
         quality = "OK"
@@ -105,7 +110,7 @@ def _check_data_quality(
         crit_x_cols = [f"{j}_x" for j in _CRITICAL_JOINTS if f"{j}_x" in df.columns]
         if crit_x_cols:
             loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
-            if loss_ratio > _MAX_TRACKING_LOSS_RATIO:
+            if loss_ratio > max_tracking_loss_ratio:
                 quality = "REVIEW"
 
         if quality == "OK":
@@ -115,7 +120,7 @@ def _check_data_quality(
                 v for k, v in avg_conf.items()
                 if k in _CRITICAL_JOINTS and not math.isnan(v)
             ]
-            if crit_confs and (sum(crit_confs) / len(crit_confs)) < _MIN_CONFIDENCE:
+            if crit_confs and (sum(crit_confs) / len(crit_confs)) < min_avg_confidence:
                 quality = "REVIEW"
 
         if quality == "OK":
@@ -123,7 +128,7 @@ def _check_data_quality(
             ratio = _get_video_aspect_ratio(video_path)
             if ratio is not None:
                 if not any(
-                    abs(ratio - std) / std <= _ASPECT_TOLERANCE
+                    abs(ratio - std) / std <= aspect_tolerance
                     for std in _STANDARD_RATIOS
                 ):
                     quality = "REVIEW"
@@ -244,6 +249,11 @@ def process_video(
     athlete_id: str,
     estimator: PoseEstimator,
     calibration_factor: float | CalibrationResult = 1.0,
+    *,
+    min_frames: int = _MIN_FRAMES,
+    max_tracking_loss_ratio: float = _MAX_TRACKING_LOSS_RATIO,
+    min_avg_confidence: float = _MIN_CONFIDENCE,
+    aspect_tolerance: float = _ASPECT_TOLERANCE,
 ) -> tuple[dict, str, str | None]:
     """Run the full analysis pipeline on one video file.
 
@@ -262,6 +272,17 @@ def process_video(
         the fallback flag into ``data_quality``.  A bare ``float`` is accepted
         for backwards compatibility (treated as ``fallback_used=False``).
         Default ``1.0`` returns distance metrics in normalised units.
+    min_frames:
+        Minimum number of frames required; shorter clips are flagged REVIEW.
+    max_tracking_loss_ratio:
+        Maximum fraction of frames where any critical joint is NaN before
+        flagging REVIEW.
+    min_avg_confidence:
+        Minimum average MediaPipe visibility for critical joints; below this
+        triggers REVIEW.
+    aspect_tolerance:
+        Allowed relative deviation from each standard aspect ratio (16:9, 4:3,
+        3:2) before flagging REVIEW.
 
     Returns
     -------
@@ -329,7 +350,13 @@ def process_video(
             bool(stride_metrics.get("has_implausible_metric"))
             or bool(vel_metrics.get("has_implausible_metric"))
         )
-        quality = _check_data_quality(df, video_path, has_implausible_metric=has_implausible)
+        quality = _check_data_quality(
+            df, video_path, has_implausible_metric=has_implausible,
+            min_frames=min_frames,
+            max_tracking_loss_ratio=max_tracking_loss_ratio,
+            min_avg_confidence=min_avg_confidence,
+            aspect_tolerance=aspect_tolerance,
+        )
         if not plausible:
             quality = f"{quality}|IMPLAUSIBLE_POSE"
         if arm_metrics["cross_body_swing"]:
@@ -355,6 +382,11 @@ def run_pipeline(
     model_complexity: int = 1,
     athlete_id: str | None = None,
     calibration_factor: float | CalibrationResult = 1.0,
+    *,
+    min_frames: int = _MIN_FRAMES,
+    max_tracking_loss_ratio: float = _MAX_TRACKING_LOSS_RATIO,
+    min_avg_confidence: float = _MIN_CONFIDENCE,
+    aspect_tolerance: float = _ASPECT_TOLERANCE,
 ) -> tuple[pd.DataFrame, dict]:
     """Process all videos in *video_dir* through the full analysis pipeline.
 
@@ -375,6 +407,17 @@ def run_pipeline(
         :class:`~athlete_vision.calibration.CalibrationResult` to propagate
         the fallback flag into each row's ``data_quality``.  Default ``1.0``
         returns distance metrics in normalised units.
+    min_frames:
+        Minimum number of frames required; shorter clips are flagged REVIEW.
+    max_tracking_loss_ratio:
+        Maximum fraction of frames where any critical joint is NaN before
+        flagging REVIEW.
+    min_avg_confidence:
+        Minimum average MediaPipe visibility for critical joints; below this
+        triggers REVIEW.
+    aspect_tolerance:
+        Allowed relative deviation from each standard aspect ratio (16:9, 4:3,
+        3:2) before flagging REVIEW.
 
     Returns
     -------
@@ -405,7 +448,11 @@ def run_pipeline(
             print(f"  {video_path.name} ...", end="", flush=True)
 
             row, status, error = process_video(
-                video_path, aid, estimator, calibration_factor=calibration_factor
+                video_path, aid, estimator, calibration_factor=calibration_factor,
+                min_frames=min_frames,
+                max_tracking_loss_ratio=max_tracking_loss_ratio,
+                min_avg_confidence=min_avg_confidence,
+                aspect_tolerance=aspect_tolerance,
             )
 
             if status == "error":
