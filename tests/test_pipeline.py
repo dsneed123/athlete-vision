@@ -17,6 +17,7 @@ from athlete_vision.pipeline import (
     print_pipeline_summary,
     process_video,
     run_pipeline,
+    validate_pose_plausibility,
 )
 
 
@@ -175,6 +176,172 @@ class TestCheckDataQuality:
             assert _check_data_quality(df_99, video) == "REVIEW"
             df_100 = _make_pose_df(n_frames=100)
             assert _check_data_quality(df_100, video) == "OK"
+
+
+# ---------------------------------------------------------------------------
+# validate_pose_plausibility
+# ---------------------------------------------------------------------------
+
+class TestValidatePosePlausibility:
+    """Tests for validate_pose_plausibility() covering each biomechanical check."""
+
+    def test_plausible_with_valid_data(self):
+        df = _make_pose_df(n_frames=120)
+        assert validate_pose_plausibility(df) is True
+
+    def test_empty_dataframe_is_plausible(self):
+        assert validate_pose_plausibility(pd.DataFrame()) is True
+
+    # --- Check 1: ankle below hip ---
+
+    def test_ankle_above_hip_flagged(self):
+        """Ankle y < hip y for all frames → implausible."""
+        df = _make_pose_df(n_frames=120)
+        # hip_y = 0.45; setting ankle_y = 0.30 puts the ankle *above* the hip
+        df["left_ankle_y"] = 0.30
+        assert validate_pose_plausibility(df) is False
+
+    def test_ankle_above_hip_right_side_flagged(self):
+        df = _make_pose_df(n_frames=120)
+        df["right_ankle_y"] = 0.30
+        assert validate_pose_plausibility(df) is False
+
+    def test_ankle_above_hip_below_threshold_passes(self):
+        """≤ 5 % of frames with ankle above hip should still pass."""
+        df = _make_pose_df(n_frames=120)
+        # 5 frames / 120 = 4.17 % < 5 % → should pass
+        df.loc[:4, "left_ankle_y"] = 0.30
+        assert validate_pose_plausibility(df) is True
+
+    def test_ankle_above_hip_above_threshold_fails(self):
+        """Just above 5 % (7/120 ≈ 5.83 %) should fail."""
+        df = _make_pose_df(n_frames=120)
+        df.loc[:6, "left_ankle_y"] = 0.30
+        assert validate_pose_plausibility(df) is False
+
+    # --- Check 2: knee between hip and ankle ---
+
+    def test_knee_above_hip_flagged(self):
+        """knee_y < hip_y means knee appears above hip → implausible."""
+        df = _make_pose_df(n_frames=120)
+        # hip_y = 0.45; knee_y = 0.30 puts knee above hip
+        df["left_knee_y"] = 0.30
+        assert validate_pose_plausibility(df) is False
+
+    def test_knee_below_ankle_flagged(self):
+        """knee_y > ankle_y means knee appears below ankle → implausible."""
+        df = _make_pose_df(n_frames=120)
+        # ankle_y oscillates in [0.7, 0.9]; 0.95 is always below
+        df["left_knee_y"] = 0.95
+        assert validate_pose_plausibility(df) is False
+
+    def test_knee_right_side_outside_chain_flagged(self):
+        df = _make_pose_df(n_frames=120)
+        df["right_knee_y"] = 0.95
+        assert validate_pose_plausibility(df) is False
+
+    # --- Check 3: elbow between shoulder and wrist ---
+
+    def test_elbow_below_shoulder_flagged(self):
+        """elbow_y > max(shoulder_y, wrist_y) → elbow below both → implausible.
+
+        In the synthetic data shoulder_y=0.30, wrist_y=0.10; setting
+        elbow_y=0.50 puts it below the shoulder (outside the valid range).
+        """
+        df = _make_pose_df(n_frames=120)
+        df["left_elbow_y"] = 0.50
+        assert validate_pose_plausibility(df) is False
+
+    def test_elbow_above_wrist_flagged(self):
+        """elbow_y < min(shoulder_y, wrist_y) → elbow above both → implausible."""
+        df = _make_pose_df(n_frames=120)
+        # wrist_y=0.10, shoulder_y=0.30; setting elbow_y=0.05 puts it above both
+        df["left_elbow_y"] = 0.05
+        assert validate_pose_plausibility(df) is False
+
+    def test_elbow_right_side_outside_range_flagged(self):
+        df = _make_pose_df(n_frames=120)
+        df["right_elbow_y"] = 0.50
+        assert validate_pose_plausibility(df) is False
+
+    # --- Check 4: left joints not to the right of right joints ---
+
+    def test_mirrored_joints_flagged(self):
+        """All left x > right x for every frame → mirrored pose → implausible."""
+        df = _make_pose_df(n_frames=120)
+        for joint in ("hip", "knee", "ankle", "shoulder", "elbow", "wrist"):
+            df[f"left_{joint}_x"] = 0.7
+            df[f"right_{joint}_x"] = 0.3
+        assert validate_pose_plausibility(df) is False
+
+    def test_equal_left_right_x_passes(self):
+        """Exactly equal left and right x (typical side-view) is not implausible."""
+        df = _make_pose_df(n_frames=120)
+        # _make_pose_df already sets left_x == right_x for every joint
+        assert validate_pose_plausibility(df) is True
+
+    # --- NaN tolerance ---
+
+    def test_all_nan_joints_treated_as_plausible(self):
+        """When all relevant joints are NaN the check is skipped (pass)."""
+        df = _make_pose_df(n_frames=120)
+        for col in df.columns:
+            if col.endswith("_y") or col.endswith("_x"):
+                df[col] = float("nan")
+        assert validate_pose_plausibility(df) is True
+
+
+# ---------------------------------------------------------------------------
+# process_video — IMPLAUSIBLE_POSE integration
+# ---------------------------------------------------------------------------
+
+class TestProcessVideoImplausiblePose:
+    """Integration tests ensuring validate_pose_plausibility is wired into process_video."""
+
+    def test_implausible_pose_appended_to_ok_quality(self, tmp_path):
+        """IMPLAUSIBLE_POSE is appended even when other quality checks pass."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        df["left_ankle_y"] = 0.30  # ankle above hip → implausible
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"):
+            row, status, error = process_video(video, "athlete_1", estimator)
+
+        assert status == "ok"
+        assert error is None
+        assert "IMPLAUSIBLE_POSE" in row["data_quality"]
+
+    def test_implausible_pose_appended_to_review_quality(self, tmp_path):
+        """IMPLAUSIBLE_POSE is appended to REVIEW when both conditions hold."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        df["left_ankle_y"] = 0.30
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="REVIEW"):
+            row, _, _ = process_video(video, "athlete_1", estimator)
+
+        assert "REVIEW" in row["data_quality"]
+        assert "IMPLAUSIBLE_POSE" in row["data_quality"]
+
+    def test_plausible_pose_leaves_quality_unchanged(self, tmp_path):
+        """A plausible pose must not add IMPLAUSIBLE_POSE to data_quality."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"):
+            row, _, _ = process_video(video, "athlete_1", estimator)
+
+        assert row["data_quality"] == "OK"
+        assert "IMPLAUSIBLE_POSE" not in row["data_quality"]
 
 
 # ---------------------------------------------------------------------------

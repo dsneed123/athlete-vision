@@ -36,6 +36,10 @@ _ASPECT_TOLERANCE = 0.15         # Allowed relative deviation from each standard
 _TIME_MIN = 3.5
 _TIME_MAX = 6.5
 
+# Pose-plausibility threshold: more than this fraction of frames failing any
+# biomechanical check triggers the IMPLAUSIBLE_POSE flag.
+_MAX_IMPLAUSIBLE_RATIO = 0.05
+
 # Canonical CSV column order
 _OUTPUT_COLUMNS = [
     "athlete_id",
@@ -111,6 +115,89 @@ def _check_data_quality(df: pd.DataFrame, video_path: Path) -> str:
     return "OK"
 
 
+def validate_pose_plausibility(df: pd.DataFrame) -> bool:
+    """Return ``False`` when > 5 % of frames fail any biomechanical check.
+
+    Normalised coordinates have y increasing downward (y=0 top, y=1 bottom),
+    so a joint that is physically lower in the body has a *larger* y value.
+
+    Checks performed on every frame (both left and right sides):
+
+    1. **Ankle below hip**: ``ankle_y > hip_y`` — ankle must not appear above
+       the hip in the frame.
+    2. **Knee between hip and ankle**: ``hip_y < knee_y < ankle_y``.
+    3. **Elbow between shoulder and wrist**: elbow y lies within
+       ``[min(shoulder_y, wrist_y), max(shoulder_y, wrist_y)]``.
+    4. **No side-crossing**: mean x of left joints must not exceed mean x of
+       right joints (would indicate a mirrored / swapped pose).
+
+    Frames where any joint involved in a check is NaN are skipped for that
+    check (benefit of the doubt for missing detections).
+    """
+    if df.empty:
+        return True
+
+    def _fail_ratio(fail: np.ndarray, valid: np.ndarray) -> float:
+        """Fraction of *valid* frames where *fail* is True."""
+        n = int(valid.sum())
+        return float(fail[valid].sum() / n) if n else 0.0
+
+    # Checks 1 & 2: lower-limb vertical chain
+    for side in ("left", "right"):
+        hip_y = df[f"{side}_hip_y"].to_numpy(dtype=float)
+        knee_y = df[f"{side}_knee_y"].to_numpy(dtype=float)
+        ankle_y = df[f"{side}_ankle_y"].to_numpy(dtype=float)
+
+        valid_ha = ~(np.isnan(hip_y) | np.isnan(ankle_y))
+        valid_hka = valid_ha & ~np.isnan(knee_y)
+
+        # Check 1: ankle below hip
+        if _fail_ratio(ankle_y < hip_y, valid_ha) > _MAX_IMPLAUSIBLE_RATIO:
+            return False
+
+        # Check 2: knee vertically between hip and ankle
+        knee_ok = (knee_y > hip_y) & (knee_y < ankle_y)
+        if _fail_ratio(~knee_ok, valid_hka) > _MAX_IMPLAUSIBLE_RATIO:
+            return False
+
+    # Check 3: upper-limb vertical chain
+    for side in ("left", "right"):
+        shoulder_y = df[f"{side}_shoulder_y"].to_numpy(dtype=float)
+        elbow_y = df[f"{side}_elbow_y"].to_numpy(dtype=float)
+        wrist_y = df[f"{side}_wrist_y"].to_numpy(dtype=float)
+
+        valid_sew = ~(np.isnan(shoulder_y) | np.isnan(elbow_y) | np.isnan(wrist_y))
+        lower = np.minimum(shoulder_y, wrist_y)
+        upper = np.maximum(shoulder_y, wrist_y)
+        elbow_ok = (elbow_y >= lower) & (elbow_y <= upper)
+        if _fail_ratio(~elbow_ok, valid_sew) > _MAX_IMPLAUSIBLE_RATIO:
+            return False
+
+    # Check 4: left joints must not be consistently to the right of right joints
+    left_x_cols = [
+        c for c in (
+            "left_hip_x", "left_knee_x", "left_ankle_x",
+            "left_shoulder_x", "left_elbow_x", "left_wrist_x",
+        )
+        if c in df.columns
+    ]
+    right_x_cols = [
+        c for c in (
+            "right_hip_x", "right_knee_x", "right_ankle_x",
+            "right_shoulder_x", "right_elbow_x", "right_wrist_x",
+        )
+        if c in df.columns
+    ]
+    if left_x_cols and right_x_cols:
+        left_mean = df[left_x_cols].mean(axis=1).to_numpy(dtype=float)
+        right_mean = df[right_x_cols].mean(axis=1).to_numpy(dtype=float)
+        valid_lr = ~(np.isnan(left_mean) | np.isnan(right_mean))
+        if _fail_ratio(left_mean > right_mean, valid_lr) > _MAX_IMPLAUSIBLE_RATIO:
+            return False
+
+    return True
+
+
 def _empty_row(athlete_id: str, video_filename: str) -> dict:
     """Return a row dict pre-filled with NaN metrics and REVIEW quality."""
     return {
@@ -166,6 +253,9 @@ def process_video(
         if df.empty:
             return row, "no_pose", None
 
+        # --- Pose plausibility (before analyzers) ---
+        plausible = validate_pose_plausibility(df)
+
         # --- Stride metrics ---
         stride_metrics = analyze_strides(df, calibration_factor=calibration_factor)
         row["stride_length"] = stride_metrics["stride_length"]
@@ -191,7 +281,10 @@ def process_video(
             row["forty_time"] = forty
 
         # --- Data quality ---
-        row["data_quality"] = _check_data_quality(df, video_path)
+        quality = _check_data_quality(df, video_path)
+        if not plausible:
+            quality = f"{quality} IMPLAUSIBLE_POSE"
+        row["data_quality"] = quality
 
         return row, "ok", None
 
