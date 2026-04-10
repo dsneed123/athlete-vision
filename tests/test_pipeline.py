@@ -14,6 +14,7 @@ from athlete_vision.pipeline import (
     _check_data_quality,
     _get_video_aspect_ratio,
     _OUTPUT_COLUMNS,
+    filter_low_confidence_frames,
     print_pipeline_summary,
     process_video,
     run_pipeline,
@@ -80,6 +81,110 @@ def _make_pose_estimator_stub(df: pd.DataFrame) -> MagicMock:
     cm.__enter__ = MagicMock(return_value=estimator)
     cm.__exit__ = MagicMock(return_value=False)
     return cm
+
+
+# ---------------------------------------------------------------------------
+# filter_low_confidence_frames
+# ---------------------------------------------------------------------------
+
+class TestFilterLowConfidenceFrames:
+    """Unit tests for filter_low_confidence_frames()."""
+
+    def _make_df(self, visibility: float, n_frames: int = 5) -> pd.DataFrame:
+        """Minimal DataFrame with a single joint and configurable visibility."""
+        data = {
+            "left_ankle_x": [0.5] * n_frames,
+            "left_ankle_y": [0.8] * n_frames,
+            "left_ankle_z": [0.0] * n_frames,
+            "left_ankle_visibility": [visibility] * n_frames,
+        }
+        return pd.DataFrame(data)
+
+    def test_nan_filled_when_visibility_below_threshold(self):
+        """x/y/z must be NaN for every frame whose visibility is below the threshold."""
+        df = self._make_df(visibility=0.70)
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert result["left_ankle_x"].isna().all()
+        assert result["left_ankle_y"].isna().all()
+        assert result["left_ankle_z"].isna().all()
+
+    def test_coordinates_intact_when_visibility_at_threshold(self):
+        """Visibility exactly at the threshold must NOT be NaN-filled."""
+        df = self._make_df(visibility=0.85)
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert not result["left_ankle_x"].isna().any()
+        assert not result["left_ankle_y"].isna().any()
+        assert not result["left_ankle_z"].isna().any()
+
+    def test_coordinates_intact_when_visibility_above_threshold(self):
+        """Visibility above the threshold must leave x/y/z unchanged."""
+        df = self._make_df(visibility=0.95)
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert not result["left_ankle_x"].isna().any()
+        assert not result["left_ankle_y"].isna().any()
+        assert not result["left_ankle_z"].isna().any()
+
+    def test_only_low_confidence_frames_are_nan_filled(self):
+        """Only the frames below the threshold are affected; others stay intact."""
+        n_frames = 10
+        visibility = [0.90] * n_frames
+        visibility[2] = 0.50   # frame 2 is below threshold
+        visibility[7] = 0.30   # frame 7 is below threshold
+        df = pd.DataFrame({
+            "left_ankle_x": [0.5] * n_frames,
+            "left_ankle_y": [0.8] * n_frames,
+            "left_ankle_z": [0.0] * n_frames,
+            "left_ankle_visibility": visibility,
+        })
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        for i in range(n_frames):
+            if i in (2, 7):
+                assert math.isnan(result["left_ankle_x"].iloc[i])
+                assert math.isnan(result["left_ankle_y"].iloc[i])
+                assert math.isnan(result["left_ankle_z"].iloc[i])
+            else:
+                assert not math.isnan(result["left_ankle_x"].iloc[i])
+
+    def test_missing_visibility_column_skipped_gracefully(self):
+        """A joint with no visibility column must not cause an error."""
+        df = pd.DataFrame({
+            "left_ankle_x": [0.5],
+            "left_ankle_y": [0.8],
+            "left_ankle_z": [0.0],
+            # no left_ankle_visibility column
+        })
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert not result["left_ankle_x"].isna().any()
+
+    def test_default_joints_cover_critical_joints(self):
+        """When joints=None the six critical joints (hips/knees/ankles) are filtered."""
+        df = _make_pose_df(n_frames=5, visibility=0.50)
+        result = filter_low_confidence_frames(df, threshold=0.85)
+        for joint in ("left_hip", "right_hip", "left_knee", "right_knee",
+                      "left_ankle", "right_ankle"):
+            assert result[f"{joint}_x"].isna().all(), f"{joint}_x should be NaN"
+            assert result[f"{joint}_y"].isna().all(), f"{joint}_y should be NaN"
+
+    def test_non_critical_joints_not_affected_by_default(self):
+        """Joints outside the default list must not be NaN-filled."""
+        df = _make_pose_df(n_frames=5, visibility=0.50)
+        result = filter_low_confidence_frames(df, threshold=0.85)
+        # Shoulders are not in the default critical joint list
+        assert not result["left_shoulder_x"].isna().any()
+
+    def test_original_dataframe_not_mutated(self):
+        """The function must return a copy; the input must be unchanged."""
+        df = self._make_df(visibility=0.50)
+        original_values = df["left_ankle_x"].tolist()
+        filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert df["left_ankle_x"].tolist() == original_values
+
+    def test_attrs_preserved(self):
+        """DataFrame attrs must be carried over to the returned copy."""
+        df = self._make_df(visibility=0.95)
+        df.attrs["avg_confidence"] = {"left_ankle": 0.95}
+        result = filter_low_confidence_frames(df, threshold=0.85, joints=["left_ankle"])
+        assert result.attrs["avg_confidence"] == {"left_ankle": 0.95}
 
 
 # ---------------------------------------------------------------------------

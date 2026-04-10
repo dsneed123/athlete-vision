@@ -62,6 +62,53 @@ _OUTPUT_COLUMNS = [
 ]
 
 
+def filter_low_confidence_frames(
+    df: pd.DataFrame,
+    threshold: float = 0.85,
+    joints: list[str] | None = None,
+) -> pd.DataFrame:
+    """NaN-fill x/y/z coordinates for joints whose per-frame visibility is below *threshold*.
+
+    Frames where a joint's visibility column is strictly below *threshold* have
+    that joint's x, y, and z columns set to NaN.  This prevents jittery or
+    occluded frames from corrupting downstream analyzers that rely on those
+    coordinates (stride contact detection, hip-extension angles, velocity).
+
+    Parameters
+    ----------
+    df:
+        DataFrame produced by ``PoseEstimator.process_video()``.
+    threshold:
+        Minimum visibility value (0–1) required to keep a joint's coordinates.
+        Frames with visibility strictly below this value are NaN-filled.
+        Default ``0.85``.
+    joints:
+        Joint names to inspect.  Defaults to the six critical joints used for
+        biomechanical analysis: hips, knees, and ankles.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy of *df* with low-confidence joint coordinates replaced by NaN.
+        The ``attrs`` dict is preserved.
+    """
+    if joints is None:
+        joints = sorted(_CRITICAL_JOINTS)
+
+    df = df.copy()
+    for joint in joints:
+        vis_col = f"{joint}_visibility"
+        if vis_col not in df.columns:
+            continue
+        low_conf = df[vis_col] < threshold
+        for axis in ("x", "y", "z"):
+            col = f"{joint}_{axis}"
+            if col in df.columns:
+                df.loc[low_conf, col] = float("nan")
+
+    return df
+
+
 def _get_video_aspect_ratio(video_path: Path) -> float | None:
     """Return width/height aspect ratio of a video, or None on failure."""
     cap = cv2.VideoCapture(str(video_path))
@@ -285,6 +332,8 @@ def process_video(
 
         if df.empty:
             return row, "no_pose", None
+
+        df = filter_low_confidence_frames(df)
 
         # --- Pose plausibility (before analyzers) ---
         plausible = validate_pose_plausibility(df)
