@@ -282,11 +282,30 @@ def web_cmd(port: int) -> None:
     type=click.IntRange(0, 2),
     help="MediaPipe model complexity (0=lite, 1=full, 2=heavy).",
 )
+@click.option(
+    "--calibration-distance",
+    default=None,
+    type=float,
+    help=(
+        "Known reference distance visible in the frame "
+        "(e.g. 40 for a 40-yard span).  Used together with "
+        "--calibration-unit to compute a pixel-to-metre scale factor."
+    ),
+)
+@click.option(
+    "--calibration-unit",
+    default="yards",
+    show_default=True,
+    type=click.Choice(["yards", "meters", "feet"], case_sensitive=False),
+    help="Unit for --calibration-distance.",
+)
 def pipeline_cmd(
     video_dir: str,
     output: str,
     athlete_id: str | None,
     model_complexity: int,
+    calibration_distance: float | None,
+    calibration_unit: str,
 ) -> None:
     """Run the full analysis pipeline on a directory of videos.
 
@@ -298,9 +317,25 @@ def pipeline_cmd(
 
     Videos are flagged REVIEW when confidence is low, the clip is too
     short, tracking was lost too often, or the camera angle is non-standard.
+
+    When --calibration-distance is provided, stride lengths and velocities
+    are reported in real-world metres.  Without it, values are in normalised
+    frame units (1 unit = full frame width).
     """
+    from .calibration import calibrate
+
     video_dir_path = Path(video_dir)
     output_path = Path(output)
+
+    cal_factor = calibrate(
+        calibration_distance=calibration_distance,
+        calibration_unit=calibration_unit,
+    )
+    if calibration_distance is not None:
+        click.echo(
+            f"Calibration: {calibration_distance} {calibration_unit} → "
+            f"factor = {cal_factor:.4f} m/unit"
+        )
 
     click.echo(f"Running pipeline on {video_dir_path} ...")
 
@@ -310,6 +345,7 @@ def pipeline_cmd(
             output_path,
             model_complexity=model_complexity,
             athlete_id=athlete_id,
+            calibration_factor=cal_factor,
         )
     except FileNotFoundError as exc:
         click.echo(str(exc), err=True)
