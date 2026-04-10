@@ -1,10 +1,6 @@
-"""YouTube video downloader for 40-yard dash clips using yt-dlp."""
-
 import json
 import logging
 import re
-import subprocess
-import urllib.error
 from pathlib import Path
 
 import click
