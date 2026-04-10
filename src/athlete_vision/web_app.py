@@ -11,16 +11,24 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from .angle_analyzer import analyze_angles
-from .arm_analyzer import analyze_arm_swing
-from .batch_processor import (
+import sys as _sys
+from pathlib import Path as _Path
+# Ensure the package root is on sys.path so absolute imports work when
+# Streamlit runs this file directly (no parent package context).
+_pkg_root = str(_Path(__file__).resolve().parent.parent)
+if _pkg_root not in _sys.path:
+    _sys.path.insert(0, _pkg_root)
+
+from athlete_vision.angle_analyzer import analyze_angles
+from athlete_vision.arm_analyzer import analyze_arm_swing
+from athlete_vision.batch_processor import (
     _extract_40_time,
     calculate_angles,
     calculate_arm_swing,
     calculate_velocity,
 )
-from .pose_estimator import PoseEstimator
-from .stride_analyzer import analyze_strides
+from athlete_vision.pose_estimator import PoseEstimator
+from athlete_vision.stride_analyzer import analyze_strides
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -857,6 +865,234 @@ def _page_batch() -> None:
     )
 
 
+# ─── Page: webcam recording & analysis ───────────────────────────────────────
+
+def _compute_angle(a, b, c):
+    """Compute angle at point b given three (x, y) points. Returns degrees."""
+    ba = (a[0] - b[0], a[1] - b[1])
+    bc = (c[0] - b[0], c[1] - b[1])
+    dot = ba[0] * bc[0] + ba[1] * bc[1]
+    mag_ba = math.sqrt(ba[0] ** 2 + ba[1] ** 2)
+    mag_bc = math.sqrt(bc[0] ** 2 + bc[1] ** 2)
+    if mag_ba * mag_bc == 0:
+        return 0.0
+    cos_angle = max(-1.0, min(1.0, dot / (mag_ba * mag_bc)))
+    return math.degrees(math.acos(cos_angle))
+
+
+def _draw_live_skeleton(frame, landmarks, w, h):
+    """Draw skeleton, joint dots, and live angle readouts on a BGR frame."""
+    from athlete_vision.pose_estimator import TRACKED_LANDMARKS
+
+    def _pt(name):
+        idx = TRACKED_LANDMARKS.get(name)
+        if idx is None:
+            return None
+        p = landmarks[idx]
+        if p.visibility < _VIS_THRESHOLD:
+            return None
+        return (int(p.x * w), int(p.y * h))
+
+    # Draw bones
+    for a_name, b_name in _SKELETON:
+        pa, pb = _pt(a_name), _pt(b_name)
+        if pa and pb:
+            color = _LEFT_COLOR if a_name.startswith("left") else _RIGHT_COLOR
+            cv2.line(frame, pa, pb, color, 3, cv2.LINE_AA)
+
+    # Draw joints
+    for name in _JOINTS:
+        pt = _pt(name)
+        if pt:
+            color = _LEFT_COLOR if name.startswith("left") else _RIGHT_COLOR
+            cv2.circle(frame, pt, 7, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, pt, 8, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # Compute and display key angles
+    angles = {}
+    angle_configs = [
+        ("L Knee", "left_hip", "left_knee", "left_ankle"),
+        ("R Knee", "right_hip", "right_knee", "right_ankle"),
+        ("L Hip", "left_shoulder", "left_hip", "left_knee"),
+        ("R Hip", "right_shoulder", "right_hip", "right_knee"),
+        ("L Elbow", "left_shoulder", "left_elbow", "left_wrist"),
+        ("R Elbow", "right_shoulder", "right_elbow", "right_wrist"),
+    ]
+    for label, ja, jb, jc in angle_configs:
+        pa, pb, pc = _pt(ja), _pt(jb), _pt(jc)
+        if pa and pb and pc:
+            ang = _compute_angle(pa, pb, pc)
+            angles[label] = ang
+            # Draw angle arc and text at joint
+            if ang < 90:
+                color = (0, 0, 255)   # Red — tight angle
+            elif ang < 150:
+                color = (0, 255, 255) # Yellow — good
+            else:
+                color = (0, 255, 0)   # Green — extended
+            cv2.putText(frame, f"{ang:.0f}", (pb[0] + 10, pb[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+    # Forward lean indicator (torso angle from vertical)
+    lh, rh = _pt("left_hip"), _pt("right_hip")
+    ls, rs = _pt("left_shoulder"), _pt("right_shoulder")
+    if lh and rh and ls and rs:
+        hip_mid = ((lh[0] + rh[0]) // 2, (lh[1] + rh[1]) // 2)
+        sho_mid = ((ls[0] + rs[0]) // 2, (ls[1] + rs[1]) // 2)
+        dx = abs(sho_mid[0] - hip_mid[0])
+        dy = hip_mid[1] - sho_mid[1]  # positive = shoulder above hip
+        lean = math.degrees(math.atan2(dx, max(dy, 1)))
+        angles["Lean"] = lean
+        if lean < 15:
+            lean_color, lean_label = (0, 255, 0), "UPRIGHT"
+        elif lean < 35:
+            lean_color, lean_label = (0, 255, 255), "DRIVE"
+        else:
+            lean_color, lean_label = (0, 0, 255), "OVER-LEAN"
+        cv2.putText(frame, f"{lean_label} {lean:.0f}deg", (15, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, lean_color, 2, cv2.LINE_AA)
+
+    return frame, angles
+
+
+def _page_webcam() -> None:
+    st.header("Live Webcam Analysis")
+    st.markdown(
+        "Record from your webcam with **live skeleton overlay** and **real-time angle feedback**. "
+        "Full biomechanical report generated after recording."
+    )
+
+    col_settings, _ = st.columns([1, 2])
+    with col_settings:
+        duration = st.slider("Recording duration (seconds)", 3, 30, 10)
+        camera_idx = st.number_input("Camera index", 0, 10, 0, help="0 = default webcam")
+
+    if st.button("Start Recording", type="primary", key="webcam_rec"):
+        st.session_state.pop("webcam_metrics", None)
+        st.session_state.pop("webcam_pose_df", None)
+        st.session_state.pop("webcam_video_bytes", None)
+        st.session_state.pop("skeleton_bytes", None)
+
+        status_txt = st.empty()
+        progress_bar = st.progress(0.0)
+        frame_display = st.empty()
+        angle_display = st.empty()
+
+        status_txt.text("Opening webcam & loading pose model...")
+        cap = cv2.VideoCapture(int(camera_idx))
+        if not cap.isOpened():
+            st.error("Could not open webcam. Check the camera index and permissions.")
+            return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or fps > 120:
+            fps = 30.0
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Init pose estimator for live skeleton
+        estimator = PoseEstimator(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+        tmp_path = tempfile.mktemp(suffix=".mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+
+        total_frames = int(fps * duration)
+        frame_count = 0
+        status_txt.text(f"Recording with live analysis... ({duration}s)")
+
+        while frame_count < total_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            writer.write(frame)
+
+            timestamp_ms = int(frame_count * 1000.0 / fps)
+            landmarks = estimator.process_frame(frame, timestamp_ms)
+
+            # Draw skeleton overlay on a copy for display
+            display_frame = frame.copy()
+            angles = {}
+            if landmarks:
+                display_frame, angles = _draw_live_skeleton(display_frame, landmarks, w, h)
+
+            frame_count += 1
+
+            # Show live preview every 2nd frame for performance
+            if frame_count % 2 == 0:
+                preview = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                frame_display.image(preview, channels="RGB", use_container_width=True)
+                progress_bar.progress(min(frame_count / total_frames, 1.0))
+
+                # Show live angle readout
+                if angles:
+                    angle_strs = [f"**{k}:** {v:.0f}\u00b0" for k, v in angles.items()]
+                    angle_display.markdown(" &nbsp;|&nbsp; ".join(angle_strs))
+
+        estimator.close()
+        cap.release()
+        writer.release()
+        frame_display.empty()
+        angle_display.empty()
+        progress_bar.progress(1.0)
+        status_txt.text(f"Recorded {frame_count} frames. Running full analysis...")
+
+        # Read the recorded video bytes
+        with open(tmp_path, "rb") as f:
+            video_bytes = f.read()
+
+        # Run full analysis pipeline
+        progress_bar2 = st.progress(0.0)
+        status_txt2 = st.empty()
+
+        def _on_progress(p: float, msg: str) -> None:
+            progress_bar2.progress(p)
+            status_txt2.text(msg)
+
+        try:
+            metrics, pose_df = _analyze_video(tmp_path, progress_cb=_on_progress)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        progress_bar2.progress(1.0)
+        status_txt2.text("Analysis complete!")
+
+        st.session_state["webcam_metrics"] = metrics
+        st.session_state["webcam_pose_df"] = pose_df
+        st.session_state["webcam_video_bytes"] = video_bytes
+
+    # Show results if available
+    metrics = st.session_state.get("webcam_metrics")
+    pose_df = st.session_state.get("webcam_pose_df", pd.DataFrame())
+    video_bytes = st.session_state.get("webcam_video_bytes", b"")
+
+    if metrics is None:
+        st.info("Press **Start Recording** to capture from your webcam with live skeleton tracking.")
+        return
+
+    status = metrics.get("status")
+    if status == "error":
+        st.error(f"Analysis failed: {metrics.get('error')}")
+        return
+    if status == "no_pose":
+        st.warning(
+            "No human pose detected in the recording. "
+            "Ensure the athlete is fully visible in frame."
+        )
+        return
+
+    _show_results(metrics, pose_df, video_bytes, "webcam_recording.mp4")
+
+    # Download recorded video
+    if video_bytes:
+        st.download_button(
+            "Download recorded video",
+            data=video_bytes,
+            file_name="athlete_vision_recording.mp4",
+            mime="video/mp4",
+        )
+
+
 # ─── App entry point ──────────────────────────────────────────────────────────
 
 def run(port: int = 8200) -> None:
@@ -889,7 +1125,7 @@ def main() -> None:
         st.caption("40-Yard Dash Analysis")
         page = st.radio(
             "Navigation",
-            ["Single Video Analysis", "Batch Processing"],
+            ["Webcam Capture", "Single Video Analysis", "Batch Processing"],
             label_visibility="collapsed",
         )
         st.divider()
@@ -905,7 +1141,9 @@ def main() -> None:
 • Peak velocity: 21–23 mph
 """)
 
-    if page == "Single Video Analysis":
+    if page == "Webcam Capture":
+        _page_webcam()
+    elif page == "Single Video Analysis":
         _page_single()
     else:
         _page_batch()

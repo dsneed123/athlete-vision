@@ -344,6 +344,105 @@ class TestProcessVideoImplausiblePose:
 
 
 # ---------------------------------------------------------------------------
+# process_video — CROSS_BODY_ARM_SWING integration
+# ---------------------------------------------------------------------------
+
+class TestProcessVideoCrossBodyArmSwing:
+    """Integration tests ensuring cross_body_swing is wired into data_quality."""
+
+    def test_cross_body_flag_appended_when_detected(self, tmp_path):
+        """CROSS_BODY_ARM_SWING is appended when arm_metrics reports it."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        arm_result = {
+            "arm_swing_symmetry": 70.0,
+            "left_arm_amplitude": 0.1,
+            "right_arm_amplitude": 0.15,
+            "left_cross_body_ratio": 0.2,
+            "right_cross_body_ratio": 0.05,
+            "cross_body_swing": True,
+        }
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"), \
+             patch("athlete_vision.pipeline.analyze_arm_swing", return_value=arm_result):
+            row, status, error = process_video(video, "athlete_1", estimator)
+
+        assert status == "ok"
+        assert "CROSS_BODY_ARM_SWING" in row["data_quality"]
+
+    def test_cross_body_flag_not_appended_when_absent(self, tmp_path):
+        """CROSS_BODY_ARM_SWING must not appear when cross_body_swing is False."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        arm_result = {
+            "arm_swing_symmetry": 90.0,
+            "left_arm_amplitude": 0.12,
+            "right_arm_amplitude": 0.12,
+            "left_cross_body_ratio": 0.02,
+            "right_cross_body_ratio": 0.02,
+            "cross_body_swing": False,
+        }
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"), \
+             patch("athlete_vision.pipeline.analyze_arm_swing", return_value=arm_result):
+            row, _, _ = process_video(video, "athlete_1", estimator)
+
+        assert "CROSS_BODY_ARM_SWING" not in row["data_quality"]
+
+    def test_cross_body_flag_combines_with_implausible_pose(self, tmp_path):
+        """Both IMPLAUSIBLE_POSE and CROSS_BODY_ARM_SWING can appear together."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        df["left_ankle_y"] = 0.30  # ankle above hip → implausible
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        arm_result = {
+            "arm_swing_symmetry": 60.0,
+            "left_arm_amplitude": 0.1,
+            "right_arm_amplitude": 0.2,
+            "left_cross_body_ratio": 0.3,
+            "right_cross_body_ratio": 0.05,
+            "cross_body_swing": True,
+        }
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"), \
+             patch("athlete_vision.pipeline.analyze_arm_swing", return_value=arm_result):
+            row, _, _ = process_video(video, "athlete_1", estimator)
+
+        assert "IMPLAUSIBLE_POSE" in row["data_quality"]
+        assert "CROSS_BODY_ARM_SWING" in row["data_quality"]
+
+    def test_cross_body_flag_with_review_quality(self, tmp_path):
+        """CROSS_BODY_ARM_SWING appended to REVIEW base quality."""
+        video = tmp_path / "sample.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        arm_result = {
+            "arm_swing_symmetry": 65.0,
+            "left_arm_amplitude": 0.1,
+            "right_arm_amplitude": 0.18,
+            "left_cross_body_ratio": 0.15,
+            "right_cross_body_ratio": 0.05,
+            "cross_body_swing": True,
+        }
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="REVIEW"), \
+             patch("athlete_vision.pipeline.analyze_arm_swing", return_value=arm_result):
+            row, _, _ = process_video(video, "athlete_1", estimator)
+
+        assert row["data_quality"] == "REVIEW|CROSS_BODY_ARM_SWING"
+
+
+# ---------------------------------------------------------------------------
 # process_video
 # ---------------------------------------------------------------------------
 

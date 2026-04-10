@@ -66,11 +66,13 @@ class TestTrackedLandmarks:
 
 class TestPoseEstimatorContextManager:
     def test_enter_exit(self):
-        with patch("mediapipe.solutions.pose.Pose") as mock_pose_cls:
-            mock_pose_cls.return_value = MagicMock()
+        mock_instance = MagicMock()
+        with patch("athlete_vision.pose_estimator.PoseLandmarker") as mock_landmarker_cls, \
+             patch("athlete_vision.pose_estimator._find_model", return_value="/fake/model.task"):
+            mock_landmarker_cls.create_from_options.return_value = mock_instance
             with PoseEstimator() as estimator:
                 assert estimator is not None
-            mock_pose_cls.return_value.close.assert_called_once()
+        mock_instance.close.assert_called_once()
 
 
 class TestProcessVideo:

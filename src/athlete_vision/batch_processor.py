@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import pandas as pd
 
@@ -274,7 +275,7 @@ def process_single_video(
         if not math.isnan(sl) and (sl < 0.05 or sl > 3.0):
             result["status"] = "flagged"
 
-    except Exception as exc:
+    except (cv2.error, FileNotFoundError, ValueError) as exc:
         result["status"] = "error"
         result["error"] = str(exc)
 

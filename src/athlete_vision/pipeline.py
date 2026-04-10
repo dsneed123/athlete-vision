@@ -284,11 +284,13 @@ def process_video(
         quality = _check_data_quality(df, video_path)
         if not plausible:
             quality = f"{quality}|IMPLAUSIBLE_POSE"
+        if arm_metrics["cross_body_swing"]:
+            quality = f"{quality}|CROSS_BODY_ARM_SWING"
         row["data_quality"] = quality
 
         return row, "ok", None
 
-    except Exception as exc:
+    except (cv2.error, FileNotFoundError) as exc:
         return row, "error", str(exc)
 
 

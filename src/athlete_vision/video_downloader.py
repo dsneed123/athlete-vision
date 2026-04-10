@@ -3,6 +3,8 @@
 import json
 import logging
 import re
+import subprocess
+import urllib.error
 from pathlib import Path
 
 import click
@@ -122,7 +124,7 @@ def search_and_download(
         try:
             with yt_dlp.YoutubeDL(search_opts) as ydl:
                 result = ydl.extract_info(f"ytsearch50:{query}", download=False)
-        except Exception as exc:
+        except (yt_dlp.utils.DownloadError, urllib.error.URLError) as exc:
             logger.warning("Search failed for query %r: %s", query, exc)
             click.echo(f"  Search error: {exc}", err=True)
             continue
