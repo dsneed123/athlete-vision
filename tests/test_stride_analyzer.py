@@ -8,6 +8,7 @@ import pytest
 
 from athlete_vision.stride_analyzer import (
     _detect_contact_phases,
+    _has_long_nan_run,
     _strides_for_foot,
     analyze_strides,
 )
@@ -270,3 +271,147 @@ class TestAnalyzeStridesMetrics:
         feet = {s["foot"] for s in result["strides"]}
         assert "left" in feet
         assert "right" in feet
+
+    def test_normal_result_includes_gap_flag(self):
+        # has_long_tracking_gap is present and False when data is clean
+        df = _gait_pattern(n_strides=2, fps=30.0)
+        result = analyze_strides(df, ground_threshold=0.8)
+        assert result["has_long_tracking_gap"] is False
+
+
+# ---------------------------------------------------------------------------
+# _has_long_nan_run
+# ---------------------------------------------------------------------------
+
+class TestHasLongNanRun:
+    def test_no_nans(self):
+        s = pd.Series([1.0, 2.0, 3.0])
+        assert _has_long_nan_run(s, max_gap=5) is False
+
+    def test_short_run_below_threshold(self):
+        s = pd.Series([1.0, float("nan"), float("nan"), 1.0])
+        assert _has_long_nan_run(s, max_gap=3) is False
+
+    def test_run_exactly_at_threshold_not_triggered(self):
+        # A run of exactly max_gap frames is NOT over the threshold
+        s = pd.Series([1.0] + [float("nan")] * 5 + [1.0])
+        assert _has_long_nan_run(s, max_gap=5) is False
+
+    def test_run_one_over_threshold(self):
+        s = pd.Series([1.0] + [float("nan")] * 6 + [1.0])
+        assert _has_long_nan_run(s, max_gap=5) is True
+
+    def test_multiple_short_runs_not_triggered(self):
+        s = pd.Series([float("nan"), float("nan"), 1.0, float("nan"), float("nan")])
+        assert _has_long_nan_run(s, max_gap=3) is False
+
+    def test_run_at_end(self):
+        s = pd.Series([1.0, 1.0] + [float("nan")] * 10)
+        assert _has_long_nan_run(s, max_gap=5) is True
+
+
+# ---------------------------------------------------------------------------
+# NaN gap detection – regression tests
+# ---------------------------------------------------------------------------
+
+class TestNanGapDetection:
+    """Regression tests: long NaN blocks must not produce phantom stride metrics."""
+
+    def test_long_nan_gap_suppresses_all_stride_metrics(self):
+        """Long NaN run (>15 frames) in both ankle y-columns → all stride metrics NaN."""
+        fps = 30.0
+        gap = 20  # > fps * 0.5 = 15 frames at 30 fps
+        n = 80
+        left_y = [0.9 if i % 15 < 5 else 0.4 for i in range(30)]
+        left_y += [float("nan")] * gap
+        left_y += [0.9 if i % 15 < 5 else 0.4 for i in range(n - 30 - gap)]
+        right_y = [0.4] * n  # right foot never touches ground → no strides
+        df = _make_df(n, left_y, right_y, fps=fps)
+
+        result = analyze_strides(df, ground_threshold=0.8)
+
+        assert result["has_long_tracking_gap"] is True
+        assert result["strides"] == []
+        assert math.isnan(result["stride_length"])
+        assert math.isnan(result["stride_frequency"])
+        assert math.isnan(result["ground_contact_ms"])
+
+    def test_long_nan_gap_prevents_phantom_strides(self):
+        """Without gap detection, ffill propagates last y-value across gap → phantom contact.
+        With detection, strides list must be empty."""
+        fps = 30.0
+        # contact block → long gap → contact block: ffill would bridge the gap
+        # and make the entire run look like one huge contact phase
+        gap = 20  # > 15 frames
+        left_y = [0.9] * 5 + [float("nan")] * gap + [0.9] * 5 + [0.4] * 20
+        right_y = [0.4] * len(left_y)
+        df = _make_df(len(left_y), left_y, right_y, fps=fps)
+
+        result = analyze_strides(df, ground_threshold=0.8)
+
+        assert result["has_long_tracking_gap"] is True
+        assert result["strides"] == []
+
+    def test_long_nan_gap_right_ankle_flagged(self):
+        """Long NaN run in right_ankle_y also triggers the flag."""
+        fps = 30.0
+        gap = 20
+        n = 80
+        right_y = [0.9 if i % 15 < 5 else 0.4 for i in range(30)]
+        right_y += [float("nan")] * gap
+        right_y += [0.9 if i % 15 < 5 else 0.4 for i in range(n - 30 - gap)]
+        left_y = [0.4] * n
+        df = _make_df(n, left_y, right_y, fps=fps)
+
+        result = analyze_strides(df, ground_threshold=0.8)
+
+        assert result["has_long_tracking_gap"] is True
+
+    def test_short_nan_gap_does_not_flag(self):
+        """NaN run shorter than threshold does not set has_long_tracking_gap."""
+        fps = 30.0
+        df = _gait_pattern(n_strides=3, fps=fps)
+        # Inject 5-frame gap — well below fps * 0.5 = 15 at 30 fps
+        df = df.copy()
+        df.loc[20:24, "left_ankle_y"] = float("nan")
+
+        result = analyze_strides(df, ground_threshold=0.8)
+
+        assert result["has_long_tracking_gap"] is False
+
+    def test_explicit_max_gap_frames_overrides_default(self):
+        """Passing max_gap_frames=25 allows a 20-frame gap without flagging."""
+        fps = 30.0
+        gap = 20  # would trigger at default threshold (fps * 0.5 = 15)
+        n = 80
+        left_y = [0.9 if i % 15 < 5 else 0.4 for i in range(30)]
+        left_y += [float("nan")] * gap
+        left_y += [0.9 if i % 15 < 5 else 0.4 for i in range(n - 30 - gap)]
+        right_y = [0.4] * n
+        df = _make_df(n, left_y, right_y, fps=fps)
+
+        result = analyze_strides(df, ground_threshold=0.8, max_gap_frames=25)
+
+        assert result["has_long_tracking_gap"] is False
+
+    def test_long_gap_only_affects_gapped_foot(self):
+        """Long NaN gap in left ankle suppresses left strides; right foot strides are kept."""
+        fps = 30.0
+        gap = 20
+        contact, swing = 5, 10
+        stride_block = [0.9] * contact + [0.4] * swing  # 15 frames per stride
+
+        left_y = stride_block * 2 + [float("nan")] * gap + stride_block * 2
+        # Right foot: clean gait for the full duration
+        n = len(left_y)
+        right_y = (stride_block * ((n // 15) + 1))[:n]
+        right_x = [0.2 + 0.02 * (i // 15) for i in range(n)]
+
+        df = _make_df(n, left_y, right_y, right_x=right_x, fps=fps)
+        result = analyze_strides(df, ground_threshold=0.8)
+
+        assert result["has_long_tracking_gap"] is True
+        left_strides = [s for s in result["strides"] if s["foot"] == "left"]
+        right_strides = [s for s in result["strides"] if s["foot"] == "right"]
+        assert left_strides == []
+        assert len(right_strides) > 0

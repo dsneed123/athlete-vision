@@ -5,6 +5,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Default gap threshold: NaN runs longer than this fraction of a second are
+# considered a "long tracking gap" and suppress stride metrics for that foot.
+_GAP_THRESHOLD_SECONDS = 0.5
+
+
+def _has_long_nan_run(series: pd.Series, max_gap: int) -> bool:
+    """Return True if any contiguous NaN run in *series* exceeds *max_gap* frames."""
+    run = 0
+    for val in series.isna():
+        if val:
+            run += 1
+            if run > max_gap:
+                return True
+        else:
+            run = 0
+    return False
+
 
 def _detect_contact_phases(
     y_series: pd.Series, threshold: float
@@ -36,19 +53,34 @@ def _strides_for_foot(
     foot: str,
     calibration_factor: float,
     ground_threshold: float,
-) -> list[dict]:
+    max_gap_frames: int,
+) -> tuple[list[dict], bool]:
     """Extract per-stride metrics for one foot ('left' or 'right').
 
     A stride is the interval from one ground-contact touchdown to the next
     ground-contact touchdown of the same foot.
+
+    Returns
+    -------
+    tuple[list[dict], bool]
+        ``(strides, has_long_gap)`` where *has_long_gap* is ``True`` when the
+        ankle y-series contains a contiguous NaN run longer than
+        *max_gap_frames*.  In that case *strides* is always empty, because
+        filling the gap with ffill/bfill would produce phantom contact phases
+        with incorrect timing.
     """
-    ankle_y = df[f"{foot}_ankle_y"].ffill().bfill()
+    raw_ankle_y = df[f"{foot}_ankle_y"]
+
+    if _has_long_nan_run(raw_ankle_y, max_gap_frames):
+        return [], True
+
+    ankle_y = raw_ankle_y.ffill().bfill()
     ankle_x = df[f"{foot}_ankle_x"].ffill().bfill()
     timestamps = df["timestamp_sec"]
 
     phases = _detect_contact_phases(ankle_y, ground_threshold)
     if len(phases) < 2:
-        return []
+        return [], False
 
     strides: list[dict] = []
     for i in range(len(phases) - 1):
@@ -88,13 +120,14 @@ def _strides_for_foot(
             }
         )
 
-    return strides
+    return strides, False
 
 
 def analyze_strides(
     df: pd.DataFrame,
     calibration_factor: float = 1.0,
     ground_threshold: float | None = None,
+    max_gap_frames: int | None = None,
 ) -> dict:
     """Analyse stride metrics from a pose keypoint DataFrame.
 
@@ -117,20 +150,30 @@ def analyze_strides(
         is considered in ground contact.  Higher y = lower in frame = closer
         to ground.  If ``None``, computed as the 80th percentile of the
         combined ankle y values so it adapts to each clip's camera angle.
+    max_gap_frames:
+        Maximum number of consecutive NaN frames allowed in an ankle
+        y-series before stride metrics for that foot are suppressed.  When
+        ``None`` (default) the threshold is derived from the clip's frame
+        rate as ``fps * 0.5`` (half a second).  Pass an explicit integer to
+        override this, e.g. ``max_gap_frames=15``.
 
     Returns
     -------
     dict
-        ``strides``           – list of per-stride dicts (one entry per detected stride)
-        ``stride_length``     – average stride length in metres (or normalised units)
-        ``stride_frequency``  – average stride frequency in strides per second
-        ``ground_contact_ms`` – average ground contact time in milliseconds
+        ``strides``                – list of per-stride dicts (one entry per detected stride)
+        ``stride_length``          – average stride length in metres (or normalised units)
+        ``stride_frequency``       – average stride frequency in strides per second
+        ``ground_contact_ms``      – average ground contact time in milliseconds
+        ``has_long_tracking_gap``  – ``True`` when a long NaN run was detected in at
+                                     least one ankle y-series; affected foot's strides
+                                     are excluded to prevent phantom-stride corruption
     """
     empty_result: dict = {
         "strides": [],
         "stride_length": float("nan"),
         "stride_frequency": float("nan"),
         "ground_contact_ms": float("nan"),
+        "has_long_tracking_gap": False,
     }
 
     if df.empty:
@@ -147,6 +190,12 @@ def analyze_strides(
     if missing:
         raise ValueError(f"DataFrame missing required columns: {missing}")
 
+    if max_gap_frames is None:
+        ts_diffs = df["timestamp_sec"].diff().dropna()
+        median_interval = float(ts_diffs.median()) if len(ts_diffs) > 0 else 0.0
+        fps = 1.0 / median_interval if median_interval > 0 else 30.0
+        max_gap_frames = max(1, int(fps * _GAP_THRESHOLD_SECONDS))
+
     if ground_threshold is None:
         combined_y = pd.concat(
             [df["left_ankle_y"].dropna(), df["right_ankle_y"].dropna()]
@@ -154,13 +203,16 @@ def analyze_strides(
         ground_threshold = float(combined_y.quantile(0.80)) if len(combined_y) else 0.8
 
     all_strides: list[dict] = []
+    has_long_gap = False
     for foot in ("left", "right"):
-        all_strides.extend(
-            _strides_for_foot(df, foot, calibration_factor, ground_threshold)
+        strides, foot_has_gap = _strides_for_foot(
+            df, foot, calibration_factor, ground_threshold, max_gap_frames
         )
+        all_strides.extend(strides)
+        has_long_gap = has_long_gap or foot_has_gap
 
     if not all_strides:
-        return empty_result
+        return {**empty_result, "has_long_tracking_gap": has_long_gap}
 
     return {
         "strides": all_strides,
@@ -171,4 +223,5 @@ def analyze_strides(
         "ground_contact_ms": float(
             np.mean([s["ground_contact_ms"] for s in all_strides])
         ),
+        "has_long_tracking_gap": has_long_gap,
     }
