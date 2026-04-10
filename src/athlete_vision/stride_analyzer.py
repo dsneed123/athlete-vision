@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+import math
+
 import numpy as np
 import pandas as pd
 
 # Default gap threshold: NaN runs longer than this fraction of a second are
 # considered a "long tracking gap" and suppress stride metrics for that foot.
 _GAP_THRESHOLD_SECONDS = 0.5
+
+# Plausibility bounds for aggregate stride metrics
+_STRIDE_LENGTH_MIN = 0.1    # metres
+_STRIDE_LENGTH_MAX = 3.5    # metres
+_GROUND_CONTACT_MS_MIN = 50.0   # milliseconds
+_GROUND_CONTACT_MS_MAX = 500.0  # milliseconds
+_STRIDE_FREQUENCY_MIN = 0.5    # Hz
+_STRIDE_FREQUENCY_MAX = 5.0    # Hz
 
 
 def _has_long_nan_run(series: pd.Series, max_gap: int) -> bool:
@@ -174,6 +185,7 @@ def analyze_strides(
         "stride_frequency": float("nan"),
         "ground_contact_ms": float("nan"),
         "has_long_tracking_gap": False,
+        "has_implausible_metric": False,
     }
 
     if df.empty:
@@ -214,7 +226,7 @@ def analyze_strides(
     if not all_strides:
         return {**empty_result, "has_long_tracking_gap": has_long_gap}
 
-    return {
+    result: dict = {
         "strides": all_strides,
         "stride_length": float(np.mean([s["stride_length_m"] for s in all_strides])),
         "stride_frequency": float(
@@ -224,4 +236,23 @@ def analyze_strides(
             np.mean([s["ground_contact_ms"] for s in all_strides])
         ),
         "has_long_tracking_gap": has_long_gap,
+        "has_implausible_metric": False,
     }
+
+    # Post-calculation plausibility bounds
+    _bounds: list[tuple[str, float, float]] = [
+        ("stride_length", _STRIDE_LENGTH_MIN, _STRIDE_LENGTH_MAX),
+        ("ground_contact_ms", _GROUND_CONTACT_MS_MIN, _GROUND_CONTACT_MS_MAX),
+        ("stride_frequency", _STRIDE_FREQUENCY_MIN, _STRIDE_FREQUENCY_MAX),
+    ]
+    for metric, lo, hi in _bounds:
+        value = result[metric]
+        if not math.isnan(value) and not (lo <= value <= hi):
+            logging.warning(
+                "stride_analyzer: %s=%.4g is outside plausible range [%g, %g]; setting to NaN",
+                metric, value, lo, hi,
+            )
+            result[metric] = float("nan")
+            result["has_implausible_metric"] = True
+
+    return result

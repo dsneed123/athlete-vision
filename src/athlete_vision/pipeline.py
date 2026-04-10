@@ -11,6 +11,7 @@ import pandas as pd
 
 from .angle_analyzer import analyze_angles
 from .arm_analyzer import analyze_arm_swing
+from .calibration import CalibrationResult
 from .pose_estimator import PoseEstimator
 from .stride_analyzer import analyze_strides
 from .velocity_analyzer import analyze_velocity
@@ -74,10 +75,14 @@ def _get_video_aspect_ratio(video_path: Path) -> float | None:
     return width / height
 
 
-def _check_data_quality(df: pd.DataFrame, video_path: Path) -> str:
-    """Return ``'REVIEW'`` when any quality criterion fails, else ``'OK'``.
+def _check_data_quality(
+    df: pd.DataFrame,
+    video_path: Path,
+    has_implausible_metric: bool = False,
+) -> str:
+    """Return a quality string beginning with ``'REVIEW'`` or ``'OK'``.
 
-    Criteria (any one triggers REVIEW):
+    Criteria that trigger REVIEW (any one is sufficient):
 
     * Fewer than 100 frames — video too short for reliable analysis.
     * More than 10 % of frames have a critical joint (hip / knee / ankle)
@@ -86,36 +91,47 @@ def _check_data_quality(df: pd.DataFrame, video_path: Path) -> str:
       MediaPipe confidence on the most important landmarks.
     * Video aspect ratio is not within 15 % of 16:9, 4:3, or 3:2 —
       portrait or unusual framing may distort pose geometry.
+
+    When *has_implausible_metric* is ``True`` (any stride or velocity metric
+    was outside its plausible bounds and was set to NaN by the analyser),
+    ``'|IMPLAUSIBLE_METRIC'`` is appended to the returned string.
     """
     if len(df) < _MIN_FRAMES:
-        return "REVIEW"
+        quality = "REVIEW"
+    else:
+        quality = "OK"
 
-    # Tracking loss: fraction of frames where any critical joint is absent
-    crit_x_cols = [f"{j}_x" for j in _CRITICAL_JOINTS if f"{j}_x" in df.columns]
-    if crit_x_cols:
-        loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
-        if loss_ratio > _MAX_TRACKING_LOSS_RATIO:
-            return "REVIEW"
+        # Tracking loss: fraction of frames where any critical joint is absent
+        crit_x_cols = [f"{j}_x" for j in _CRITICAL_JOINTS if f"{j}_x" in df.columns]
+        if crit_x_cols:
+            loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
+            if loss_ratio > _MAX_TRACKING_LOSS_RATIO:
+                quality = "REVIEW"
 
-    # Average confidence on critical joints (stored in DataFrame attrs)
-    avg_conf: dict = df.attrs.get("avg_confidence", {})
-    crit_confs = [
-        v for k, v in avg_conf.items()
-        if k in _CRITICAL_JOINTS and not math.isnan(v)
-    ]
-    if crit_confs and (sum(crit_confs) / len(crit_confs)) < _MIN_CONFIDENCE:
-        return "REVIEW"
+        if quality == "OK":
+            # Average confidence on critical joints (stored in DataFrame attrs)
+            avg_conf: dict = df.attrs.get("avg_confidence", {})
+            crit_confs = [
+                v for k, v in avg_conf.items()
+                if k in _CRITICAL_JOINTS and not math.isnan(v)
+            ]
+            if crit_confs and (sum(crit_confs) / len(crit_confs)) < _MIN_CONFIDENCE:
+                quality = "REVIEW"
 
-    # Aspect ratio check
-    ratio = _get_video_aspect_ratio(video_path)
-    if ratio is not None:
-        if not any(
-            abs(ratio - std) / std <= _ASPECT_TOLERANCE
-            for std in _STANDARD_RATIOS
-        ):
-            return "REVIEW"
+        if quality == "OK":
+            # Aspect ratio check
+            ratio = _get_video_aspect_ratio(video_path)
+            if ratio is not None:
+                if not any(
+                    abs(ratio - std) / std <= _ASPECT_TOLERANCE
+                    for std in _STANDARD_RATIOS
+                ):
+                    quality = "REVIEW"
 
-    return "OK"
+    if has_implausible_metric:
+        quality = f"{quality}|IMPLAUSIBLE_METRIC"
+
+    return quality
 
 
 def validate_pose_plausibility(df: pd.DataFrame) -> bool:
@@ -227,7 +243,7 @@ def process_video(
     video_path: Path,
     athlete_id: str,
     estimator: PoseEstimator,
-    calibration_factor: float = 1.0,
+    calibration_factor: float | CalibrationResult = 1.0,
 ) -> tuple[dict, str, str | None]:
     """Run the full analysis pipeline on one video file.
 
@@ -241,8 +257,11 @@ def process_video(
         An already-initialised :class:`PoseEstimator` instance.
     calibration_factor:
         Converts one normalised x-coordinate unit to metres.  Derive via
-        :func:`athlete_vision.calibration.calibrate`.  Default ``1.0`` returns
-        distance metrics in normalised units.
+        :func:`athlete_vision.calibration.calibrate`.  Pass a
+        :class:`~athlete_vision.calibration.CalibrationResult` to propagate
+        the fallback flag into ``data_quality``.  A bare ``float`` is accepted
+        for backwards compatibility (treated as ``fallback_used=False``).
+        Default ``1.0`` returns distance metrics in normalised units.
 
     Returns
     -------
@@ -251,6 +270,14 @@ def process_video(
         ``'no_pose'``, or ``'error'``, and *error* is a message string
         when *status* is ``'error'``, else ``None``.
     """
+    # Unpack CalibrationResult; a bare float is treated as fallback_used=False.
+    if isinstance(calibration_factor, CalibrationResult):
+        _cal_factor = calibration_factor.factor
+        _cal_fallback = calibration_factor.fallback_used
+    else:
+        _cal_factor = float(calibration_factor)
+        _cal_fallback = False
+
     row = _empty_row(athlete_id, video_path.name)
 
     try:
@@ -263,7 +290,7 @@ def process_video(
         plausible = validate_pose_plausibility(df)
 
         # --- Stride metrics ---
-        stride_metrics = analyze_strides(df, calibration_factor=calibration_factor)
+        stride_metrics = analyze_strides(df, calibration_factor=_cal_factor)
         row["stride_length"] = stride_metrics["stride_length"]
         row["stride_frequency"] = stride_metrics["stride_frequency"]
         row["ground_contact_ms"] = stride_metrics["ground_contact_ms"]
@@ -280,7 +307,7 @@ def process_video(
         row["arm_swing_symmetry"] = arm_metrics["arm_swing_symmetry"]
 
         # --- Velocity / 40-time ---
-        vel_metrics = analyze_velocity(df, calibration_factor=calibration_factor)
+        vel_metrics = analyze_velocity(df, calibration_factor=_cal_factor)
         row["peak_velocity_mph"] = vel_metrics["peak_velocity_mph"]
         forty = vel_metrics["forty_time"]
         if not math.isnan(forty) and _TIME_MIN <= forty <= _TIME_MAX:
@@ -298,13 +325,22 @@ def process_video(
         row["avg_confidence_knees"] = _mean_conf("left_knee", "right_knee")
 
         # --- Data quality ---
-        quality = _check_data_quality(df, video_path)
+        has_implausible = (
+            bool(stride_metrics.get("has_implausible_metric"))
+            or bool(vel_metrics.get("has_implausible_metric"))
+        )
+        quality = _check_data_quality(df, video_path, has_implausible_metric=has_implausible)
         if not plausible:
             quality = f"{quality}|IMPLAUSIBLE_POSE"
         if arm_metrics["cross_body_swing"]:
             quality = f"{quality}|CROSS_BODY_ARM_SWING"
         if stride_metrics.get("has_long_tracking_gap"):
             quality = f"{quality}|LONG_TRACKING_GAP"
+        if _cal_fallback:
+            segments = quality.split("|")
+            if segments[0] == "OK":
+                segments[0] = "REVIEW"
+            quality = "|".join(segments) + "|CALIBRATION_FALLBACK"
         row["data_quality"] = quality
 
         return row, "ok", None
@@ -318,7 +354,7 @@ def run_pipeline(
     output_csv: Path,
     model_complexity: int = 1,
     athlete_id: str | None = None,
-    calibration_factor: float = 1.0,
+    calibration_factor: float | CalibrationResult = 1.0,
 ) -> tuple[pd.DataFrame, dict]:
     """Process all videos in *video_dir* through the full analysis pipeline.
 
@@ -335,8 +371,10 @@ def run_pipeline(
         video filename stem when ``None``.
     calibration_factor:
         Converts one normalised x-coordinate unit to metres.  Derive via
-        :func:`athlete_vision.calibration.calibrate`.  Default ``1.0`` returns
-        distance metrics in normalised units.
+        :func:`athlete_vision.calibration.calibrate`.  Accepts a
+        :class:`~athlete_vision.calibration.CalibrationResult` to propagate
+        the fallback flag into each row's ``data_quality``.  Default ``1.0``
+        returns distance metrics in normalised units.
 
     Returns
     -------
