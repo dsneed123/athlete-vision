@@ -17,15 +17,12 @@ import numpy as np
 import pandas as pd
 
 from .arm_analyzer import analyze_arm_swing
+from .constants import FORTY_TIME_MAX, FORTY_TIME_MIN
 from .pose_estimator import PoseEstimator
 from .stride_analyzer import analyze_strides
 from .velocity_analyzer import analyze_velocity
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
-
-# Plausible 40-yard dash range (seconds)
-_TIME_MIN = 3.5
-_TIME_MAX = 6.5
 
 
 def _angle_between(
@@ -152,7 +149,7 @@ def _extract_40_time(df: pd.DataFrame) -> Optional[float]:
 
     Finds the window of sustained hip displacement and uses its duration as a
     proxy for race time.  Returns None when the estimate falls outside the
-    plausible range [3.5, 6.5] s or when data is insufficient.
+    plausible range [FORTY_TIME_MIN, FORTY_TIME_MAX] or when data is insufficient.
     """
     if df.empty or len(df) < 10:
         return None
@@ -178,7 +175,7 @@ def _extract_40_time(df: pd.DataFrame) -> Optional[float]:
     end_ts_idx = min(end_frame + 1, len(timestamps) - 1)
     elapsed = float(timestamps[end_ts_idx] - timestamps[start_frame])
 
-    return elapsed if _TIME_MIN <= elapsed <= _TIME_MAX else None
+    return elapsed if FORTY_TIME_MIN <= elapsed <= FORTY_TIME_MAX else None
 
 
 def _lookup_metadata(video_name: str, metadata_by_id: dict) -> dict:

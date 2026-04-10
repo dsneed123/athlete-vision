@@ -10,6 +10,8 @@ from pathlib import Path
 import click
 import yt_dlp
 
+from .constants import FORTY_TIME_MAX, FORTY_TIME_MIN
+
 logger = logging.getLogger(__name__)
 
 SEARCH_QUERIES: list[str] = [
@@ -20,9 +22,6 @@ SEARCH_QUERIES: list[str] = [
     "college 40 yard dash",
 ]
 
-# Realistic 40-yard dash time range (seconds)
-_TIME_MIN = 3.8
-_TIME_MAX = 5.5
 _TIME_RE = re.compile(r"\b([345]\.\d{1,3})\b")
 
 # Clips longer than this are treated as compilations
@@ -46,7 +45,7 @@ def _extract_metadata(title: str, description: str = "") -> dict:
     # Search title first, then description
     for text in (title, description):
         times = _TIME_RE.findall(text)
-        valid = [t for t in times if _TIME_MIN <= float(t) <= _TIME_MAX]
+        valid = [t for t in times if FORTY_TIME_MIN <= float(t) <= FORTY_TIME_MAX]
         if valid:
             meta["known_time"] = float(valid[0])
             break

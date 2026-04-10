@@ -7,9 +7,7 @@ import math
 import numpy as np
 import pandas as pd
 
-# Plausible 40-yard dash range (seconds)
-_TIME_MIN = 3.5
-_TIME_MAX = 6.5
+from .constants import FORTY_TIME_MAX, FORTY_TIME_MIN
 
 # Default calibration: 40 yards = 36.576 metres.  Without a real calibration
 # the caller should supply calibration_factor derived from a known reference.
@@ -87,7 +85,8 @@ def analyze_velocity(
         ``forty_time``        – estimated 40-yard dash time in seconds, derived
                                 from the first-movement frame to the last-movement
                                 frame (``nan`` when outside the plausible range
-                                [3.5, 6.5] s or when data is insufficient).
+                                [FORTY_TIME_MIN, FORTY_TIME_MAX] or when data is
+                                insufficient).
     """
     empty: dict = {
         "peak_velocity_mph": float("nan"),
@@ -144,7 +143,7 @@ def analyze_velocity(
         start_f, end_f = window
         end_ts_idx = min(end_f + 1, len(timestamps) - 1)
         elapsed = float(timestamps[end_ts_idx] - timestamps[start_f])
-        if _TIME_MIN <= elapsed <= _TIME_MAX:
+        if FORTY_TIME_MIN <= elapsed <= FORTY_TIME_MAX:
             forty_time = elapsed
 
     return {
