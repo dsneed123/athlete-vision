@@ -54,6 +54,9 @@ _OUTPUT_COLUMNS = [
     "forward_lean_angle",
     "transition_point_yards",
     "peak_velocity_mph",
+    "avg_confidence_hips",
+    "avg_confidence_ankles",
+    "avg_confidence_knees",
     "data_quality",
 ]
 
@@ -213,6 +216,9 @@ def _empty_row(athlete_id: str, video_filename: str) -> dict:
         "forward_lean_angle": float("nan"),
         "transition_point_yards": float("nan"),
         "peak_velocity_mph": float("nan"),
+        "avg_confidence_hips": float("nan"),
+        "avg_confidence_ankles": float("nan"),
+        "avg_confidence_knees": float("nan"),
         "data_quality": "REVIEW",
     }
 
@@ -279,6 +285,17 @@ def process_video(
         forty = vel_metrics["forty_time"]
         if not math.isnan(forty) and _TIME_MIN <= forty <= _TIME_MAX:
             row["forty_time"] = forty
+
+        # --- Per-joint-group confidence ---
+        avg_conf: dict = df.attrs.get("avg_confidence", {})
+
+        def _mean_conf(*joints: str) -> float:
+            vals = [avg_conf[j] for j in joints if j in avg_conf and not math.isnan(avg_conf[j])]
+            return sum(vals) / len(vals) if vals else float("nan")
+
+        row["avg_confidence_hips"] = _mean_conf("left_hip", "right_hip")
+        row["avg_confidence_ankles"] = _mean_conf("left_ankle", "right_ankle")
+        row["avg_confidence_knees"] = _mean_conf("left_knee", "right_knee")
 
         # --- Data quality ---
         quality = _check_data_quality(df, video_path)

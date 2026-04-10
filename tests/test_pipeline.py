@@ -530,6 +530,38 @@ class TestProcessVideo:
 
         assert math.isnan(row["forty_time"])
 
+    def test_confidence_columns_present_and_in_range(self, tmp_path):
+        """avg_confidence_hips/ankles/knees must be present and in [0.0, 1.0]."""
+        video = tmp_path / "conf.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120, visibility=0.95)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"):
+            row, status, _ = process_video(video, "ath", estimator)
+
+        assert status == "ok"
+        for col in ("avg_confidence_hips", "avg_confidence_ankles", "avg_confidence_knees"):
+            assert col in row, f"Missing column: {col}"
+            assert 0.0 <= row[col] <= 1.0, f"{col}={row[col]} not in [0.0, 1.0]"
+
+    def test_confidence_columns_nan_when_no_attrs(self, tmp_path):
+        """When avg_confidence attrs are absent the columns must be NaN."""
+        video = tmp_path / "noconf.mp4"
+        video.touch()
+        df = _make_pose_df(n_frames=120)
+        df.attrs.pop("avg_confidence", None)
+        estimator = MagicMock()
+        estimator.process_video.return_value = df
+
+        with patch("athlete_vision.pipeline._check_data_quality", return_value="OK"):
+            row, status, _ = process_video(video, "ath", estimator)
+
+        assert status == "ok"
+        for col in ("avg_confidence_hips", "avg_confidence_ankles", "avg_confidence_knees"):
+            assert math.isnan(row[col]), f"{col} should be NaN when attrs absent"
+
 
 # ---------------------------------------------------------------------------
 # run_pipeline
@@ -556,6 +588,9 @@ class TestRunPipeline:
                 "forward_lean_angle": 30.0,
                 "transition_point_yards": 12.0,
                 "peak_velocity_mph": 20.5,
+                "avg_confidence_hips": 0.95,
+                "avg_confidence_ankles": 0.95,
+                "avg_confidence_knees": 0.95,
                 "data_quality": "OK",
             },
             "ok",
