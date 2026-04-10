@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
@@ -275,7 +278,7 @@ def process_single_video(
         if not math.isnan(sl) and (sl < 0.05 or sl > 3.0):
             result["status"] = "flagged"
 
-    except (cv2.error, FileNotFoundError, ValueError) as exc:
+    except (cv2.error, FileNotFoundError, ValueError, RuntimeError) as exc:
         result["status"] = "error"
         result["error"] = str(exc)
 
@@ -312,8 +315,8 @@ def batch_process(
                     key = rec.get("video_id") or rec.get("filename", "")
                     if key:
                         metadata_by_id[key] = rec
-        except (json.JSONDecodeError, AttributeError):
-            pass
+        except (json.JSONDecodeError, AttributeError) as exc:
+            logger.warning("Failed to parse metadata file %s: %s", metadata_path, exc)
 
     video_files = sorted(
         p
