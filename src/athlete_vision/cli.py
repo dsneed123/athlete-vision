@@ -103,7 +103,7 @@ def download_cmd(count: int, output_dir: str, model_complexity: int) -> None:
 
     # --- 1. Download videos ---
     click.echo(f"Downloading up to {count} videos to {output_path} ...")
-    downloaded = search_and_download(
+    downloaded, failed_downloads = search_and_download(
         queries=SEARCH_QUERIES,
         count=count,
         output_dir=output_path,
@@ -194,6 +194,11 @@ def download_cmd(count: int, output_dir: str, model_complexity: int) -> None:
             )
     else:
         click.echo("No videos with known 40-yard dash times found in titles.")
+
+    if failed_downloads:
+        click.echo(f"\n{len(failed_downloads)} download(s) failed:", err=True)
+        for f in failed_downloads:
+            click.echo(f"  {f['video_id']}  {f['title'][:60]}  — {f['error']}", err=True)
 
 
 @main.command("batch")

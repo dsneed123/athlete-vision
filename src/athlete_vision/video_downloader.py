@@ -1,11 +1,14 @@
 """YouTube video downloader for 40-yard dash clips using yt-dlp."""
 
 import json
+import logging
 import re
 from pathlib import Path
 
 import click
 import yt_dlp
+
+logger = logging.getLogger(__name__)
 
 SEARCH_QUERIES: list[str] = [
     "40 yard dash",
@@ -58,13 +61,14 @@ def search_and_download(
     queries: list[str],
     count: int,
     output_dir: Path,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Search YouTube and download individual 40-yard dash clips.
 
     Skips compilations (duration > 120 s).  Prefers 720p–1080p.
     Saves metadata to output_dir/metadata.json.
 
-    Returns metadata dicts for newly downloaded videos.
+    Returns a tuple of (downloaded, failed_downloads) where each entry in
+    failed_downloads has keys: video_id, url, title, error.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"
@@ -77,6 +81,7 @@ def search_and_download(
             existing = {}
 
     downloaded: list[dict] = []
+    failed_downloads: list[dict] = []
     seen_ids: set[str] = set(existing.keys())
 
     # Flat search: get playlist of video IDs without downloading
@@ -118,6 +123,7 @@ def search_and_download(
             with yt_dlp.YoutubeDL(search_opts) as ydl:
                 result = ydl.extract_info(f"ytsearch50:{query}", download=False)
         except Exception as exc:
+            logger.warning("Search failed for query %r: %s", query, exc)
             click.echo(f"  Search error: {exc}", err=True)
             continue
 
@@ -147,8 +153,12 @@ def search_and_download(
                         )
                     if full_info:
                         duration = full_info.get("duration")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to fetch full metadata for video %s: %s",
+                        video_id,
+                        exc,
+                    )
 
             if duration is not None and duration > MAX_CLIP_DURATION:
                 title = (full_info or entry).get("title", video_id)
@@ -170,7 +180,11 @@ def search_and_download(
                 with yt_dlp.YoutubeDL(dl_opts) as ydl:
                     ydl.download([video_url])
             except Exception as exc:
+                logger.warning("Download failed for %s (%s): %s", video_id, title[:60], exc)
                 click.echo(f"  Download failed: {exc}", err=True)
+                failed_downloads.append(
+                    {"video_id": video_id, "url": video_url, "title": title, "error": str(exc)}
+                )
                 seen_ids.add(video_id)
                 continue
 
@@ -189,4 +203,4 @@ def search_and_download(
     metadata_path.write_text(json.dumps(existing, indent=2))
     click.echo(f"Saved metadata -> {metadata_path}")
 
-    return downloaded
+    return downloaded, failed_downloads
