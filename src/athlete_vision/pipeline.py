@@ -286,6 +286,8 @@ def process_video(
             quality = f"{quality}|IMPLAUSIBLE_POSE"
         if arm_metrics["cross_body_swing"]:
             quality = f"{quality}|CROSS_BODY_ARM_SWING"
+        if stride_metrics.get("has_long_tracking_gap"):
+            quality = f"{quality}|LONG_TRACKING_GAP"
         row["data_quality"] = quality
 
         return row, "ok", None
