@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from .angle_analyzer import analyze_angles
+from .arm_analyzer import analyze_arm_swing
 from .batch_processor import (
     _extract_40_time,
     calculate_angles,
@@ -214,10 +215,7 @@ def _analyze_video(
         _prog(0.87, "Computing arm swing...")
         arm = calculate_arm_swing(pose_df)
         metrics.update(arm)
-        la = float(arm.get("left_arm_swing_amplitude", float("nan")) or float("nan"))
-        ra = float(arm.get("right_arm_swing_amplitude", float("nan")) or float("nan"))
-        if not (math.isnan(la) or math.isnan(ra)) and (la + ra) > 0:
-            metrics["arm_swing_symmetry"] = abs(la - ra) / ((la + ra) / 2.0)
+        metrics["arm_swing_symmetry"] = analyze_arm_swing(pose_df)["arm_swing_symmetry"]
 
         _prog(0.93, "Estimating 40-yard time...")
         t = _extract_40_time(pose_df)
