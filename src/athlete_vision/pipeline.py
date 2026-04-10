@@ -11,6 +11,15 @@ import pandas as pd
 
 from .angle_analyzer import analyze_angles
 from .arm_analyzer import analyze_arm_swing
+from .constants import (
+    ASPECT_TOLERANCE,
+    CONFIDENCE_THRESHOLD,
+    FORTY_TIME_MAX,
+    FORTY_TIME_MIN,
+    MAX_IMPLAUSIBLE_RATIO,
+    MAX_TRACKING_LOSS,
+    MIN_FRAMES,
+)
 from .pose_estimator import PoseEstimator
 from .stride_analyzer import analyze_strides
 from .velocity_analyzer import analyze_velocity
@@ -22,23 +31,9 @@ _CRITICAL_JOINTS = frozenset(
     {"left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"}
 )
 
-# Data-quality thresholds
-_MIN_CONFIDENCE = 0.85           # Average visibility for critical joints
-_MIN_FRAMES = 100                # Minimum frame count
-_MAX_TRACKING_LOSS_RATIO = 0.10  # Max fraction of frames with any critical joint NaN
-
 # Standard landscape aspect ratios (width / height).
 # Portrait (9/16 ≈ 0.56) is intentionally absent — it flags as non-standard.
 _STANDARD_RATIOS = (16 / 9, 4 / 3, 3 / 2)
-_ASPECT_TOLERANCE = 0.15         # Allowed relative deviation from each standard ratio
-
-# Plausible 40-yard dash range (seconds)
-_TIME_MIN = 3.5
-_TIME_MAX = 6.5
-
-# Pose-plausibility threshold: more than this fraction of frames failing any
-# biomechanical check triggers the IMPLAUSIBLE_POSE flag.
-_MAX_IMPLAUSIBLE_RATIO = 0.05
 
 # Canonical CSV column order
 _OUTPUT_COLUMNS = [
@@ -87,14 +82,14 @@ def _check_data_quality(df: pd.DataFrame, video_path: Path) -> str:
     * Video aspect ratio is not within 15 % of 16:9, 4:3, or 3:2 —
       portrait or unusual framing may distort pose geometry.
     """
-    if len(df) < _MIN_FRAMES:
+    if len(df) < MIN_FRAMES:
         return "REVIEW"
 
     # Tracking loss: fraction of frames where any critical joint is absent
     crit_x_cols = [f"{j}_x" for j in _CRITICAL_JOINTS if f"{j}_x" in df.columns]
     if crit_x_cols:
         loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
-        if loss_ratio > _MAX_TRACKING_LOSS_RATIO:
+        if loss_ratio > MAX_TRACKING_LOSS:
             return "REVIEW"
 
     # Average confidence on critical joints (stored in DataFrame attrs)
@@ -103,14 +98,14 @@ def _check_data_quality(df: pd.DataFrame, video_path: Path) -> str:
         v for k, v in avg_conf.items()
         if k in _CRITICAL_JOINTS and not math.isnan(v)
     ]
-    if crit_confs and (sum(crit_confs) / len(crit_confs)) < _MIN_CONFIDENCE:
+    if crit_confs and (sum(crit_confs) / len(crit_confs)) < CONFIDENCE_THRESHOLD:
         return "REVIEW"
 
     # Aspect ratio check
     ratio = _get_video_aspect_ratio(video_path)
     if ratio is not None:
         if not any(
-            abs(ratio - std) / std <= _ASPECT_TOLERANCE
+            abs(ratio - std) / std <= ASPECT_TOLERANCE
             for std in _STANDARD_RATIOS
         ):
             return "REVIEW"
@@ -155,12 +150,12 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         valid_hka = valid_ha & ~np.isnan(knee_y)
 
         # Check 1: ankle below hip
-        if _fail_ratio(ankle_y < hip_y, valid_ha) > _MAX_IMPLAUSIBLE_RATIO:
+        if _fail_ratio(ankle_y < hip_y, valid_ha) > MAX_IMPLAUSIBLE_RATIO:
             return False
 
         # Check 2: knee vertically between hip and ankle
         knee_ok = (knee_y > hip_y) & (knee_y < ankle_y)
-        if _fail_ratio(~knee_ok, valid_hka) > _MAX_IMPLAUSIBLE_RATIO:
+        if _fail_ratio(~knee_ok, valid_hka) > MAX_IMPLAUSIBLE_RATIO:
             return False
 
     # Check 3: upper-limb vertical chain
@@ -173,7 +168,7 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         lower = np.minimum(shoulder_y, wrist_y)
         upper = np.maximum(shoulder_y, wrist_y)
         elbow_ok = (elbow_y >= lower) & (elbow_y <= upper)
-        if _fail_ratio(~elbow_ok, valid_sew) > _MAX_IMPLAUSIBLE_RATIO:
+        if _fail_ratio(~elbow_ok, valid_sew) > MAX_IMPLAUSIBLE_RATIO:
             return False
 
     # Check 4: left joints must not be consistently to the right of right joints
@@ -195,7 +190,7 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         left_mean = df[left_x_cols].mean(axis=1).to_numpy(dtype=float)
         right_mean = df[right_x_cols].mean(axis=1).to_numpy(dtype=float)
         valid_lr = ~(np.isnan(left_mean) | np.isnan(right_mean))
-        if _fail_ratio(left_mean > right_mean, valid_lr) > _MAX_IMPLAUSIBLE_RATIO:
+        if _fail_ratio(left_mean > right_mean, valid_lr) > MAX_IMPLAUSIBLE_RATIO:
             return False
 
     return True
@@ -283,7 +278,7 @@ def process_video(
         vel_metrics = analyze_velocity(df, calibration_factor=calibration_factor)
         row["peak_velocity_mph"] = vel_metrics["peak_velocity_mph"]
         forty = vel_metrics["forty_time"]
-        if not math.isnan(forty) and _TIME_MIN <= forty <= _TIME_MAX:
+        if not math.isnan(forty) and FORTY_TIME_MIN <= forty <= FORTY_TIME_MAX:
             row["forty_time"] = forty
 
         # --- Per-joint-group confidence ---
