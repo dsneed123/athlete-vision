@@ -8,6 +8,7 @@ import click
 import pandas as pd
 
 from .batch_processor import batch_process, generate_html_report, print_summary
+from .pipeline import print_pipeline_summary, run_pipeline
 from .pose_estimator import PoseEstimator
 from .video_downloader import SEARCH_QUERIES, search_and_download
 
@@ -253,6 +254,69 @@ def web_cmd(port: int) -> None:
 
     click.echo(f"Starting Athlete Vision web interface on http://localhost:{port}")
     run(port)
+
+
+@main.command("pipeline")
+@click.option(
+    "--video-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, readable=True),
+    help="Directory containing video files (.mp4, .mov, .avi, .mkv).",
+)
+@click.option(
+    "--output",
+    default="pipeline_output.csv",
+    show_default=True,
+    type=click.Path(writable=True),
+    help="Output CSV path.",
+)
+@click.option(
+    "--athlete-id",
+    default=None,
+    help="Athlete identifier for all rows (default: video filename stem).",
+)
+@click.option(
+    "--model-complexity",
+    default=1,
+    show_default=True,
+    type=click.IntRange(0, 2),
+    help="MediaPipe model complexity (0=lite, 1=full, 2=heavy).",
+)
+def pipeline_cmd(
+    video_dir: str,
+    output: str,
+    athlete_id: str | None,
+    model_complexity: int,
+) -> None:
+    """Run the full analysis pipeline on a directory of videos.
+
+    Produces a CSV with one row per video containing: athlete_id,
+    video_filename, forty_time, stride_length, stride_frequency,
+    ground_contact_ms, drive_phase_angle, hip_extension,
+    arm_swing_symmetry, forward_lean_angle, transition_point_yards,
+    peak_velocity_mph, data_quality.
+
+    Videos are flagged REVIEW when confidence is low, the clip is too
+    short, tracking was lost too often, or the camera angle is non-standard.
+    """
+    video_dir_path = Path(video_dir)
+    output_path = Path(output)
+
+    click.echo(f"Running pipeline on {video_dir_path} ...")
+
+    try:
+        df, stats = run_pipeline(
+            video_dir_path,
+            output_path,
+            model_complexity=model_complexity,
+            athlete_id=athlete_id,
+        )
+    except FileNotFoundError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    click.echo(f"\nOutput written -> {output_path}  ({len(df)} row(s))")
+    print_pipeline_summary(df, stats)
 
 
 @main.command("report")
