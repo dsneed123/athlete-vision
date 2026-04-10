@@ -283,7 +283,7 @@ def process_video(
         # --- Data quality ---
         quality = _check_data_quality(df, video_path)
         if not plausible:
-            quality = f"{quality} IMPLAUSIBLE_POSE"
+            quality = f"{quality}|IMPLAUSIBLE_POSE"
         row["data_quality"] = quality
 
         return row, "ok", None
@@ -359,7 +359,7 @@ def run_pipeline(
                 quality = row["data_quality"]
                 print(f" [{quality}]")
                 stats["processed"] += 1
-                if quality == "REVIEW":
+                if quality.split("|")[0] == "REVIEW":
                     stats["flagged"] += 1
 
             rows.append(row)
@@ -376,6 +376,9 @@ def print_pipeline_summary(df: pd.DataFrame, stats: dict) -> None:
     print(f"  Flagged (REVIEW): {stats['flagged']}")
     print(f"  Failed          : {stats['failed']}")
     print(f"  Total           : {len(df)}")
+    implausible = int(df["data_quality"].str.contains("IMPLAUSIBLE_POSE", na=False).sum())
+    if implausible:
+        print(f"  Implausible pose: {implausible}")
 
     # 40-time distribution
     times = pd.to_numeric(df["forty_time"], errors="coerce").dropna()
