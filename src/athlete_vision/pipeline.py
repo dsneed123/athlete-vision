@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from .calibration import CalibrationResult
 from .pose_estimator import PoseEstimator
 from .stride_analyzer import analyze_strides
 from .velocity_analyzer import analyze_velocity
+
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
 
@@ -101,6 +104,12 @@ def filter_low_confidence_frames(
         if vis_col not in df.columns:
             continue
         low_conf = df[vis_col] < threshold
+        count = int(low_conf.sum())
+        if count:
+            logger.warning(
+                "filter_low_confidence_frames: %s: %d/%d frames below confidence threshold %.2f",
+                joint, count, len(df), threshold,
+            )
         for axis in ("x", "y", "z"):
             col = f"{joint}_{axis}"
             if col in df.columns:
@@ -144,6 +153,10 @@ def _check_data_quality(
     ``'|IMPLAUSIBLE_METRIC'`` is appended to the returned string.
     """
     if len(df) < _MIN_FRAMES:
+        logger.warning(
+            "_check_data_quality: frame_count=%d is below minimum %d; flagging REVIEW",
+            len(df), _MIN_FRAMES,
+        )
         quality = "REVIEW"
     else:
         quality = "OK"
@@ -153,6 +166,10 @@ def _check_data_quality(
         if crit_x_cols:
             loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
             if loss_ratio > _MAX_TRACKING_LOSS_RATIO:
+                logger.warning(
+                    "_check_data_quality: tracking_loss_ratio=%.3f exceeds threshold %.2f; flagging REVIEW",
+                    loss_ratio, _MAX_TRACKING_LOSS_RATIO,
+                )
                 quality = "REVIEW"
 
         if quality == "OK":
@@ -162,8 +179,14 @@ def _check_data_quality(
                 v for k, v in avg_conf.items()
                 if k in _CRITICAL_JOINTS and not math.isnan(v)
             ]
-            if crit_confs and (sum(crit_confs) / len(crit_confs)) < _MIN_CONFIDENCE:
-                quality = "REVIEW"
+            if crit_confs:
+                avg_crit_conf = sum(crit_confs) / len(crit_confs)
+                if avg_crit_conf < _MIN_CONFIDENCE:
+                    logger.warning(
+                        "_check_data_quality: avg_critical_joint_confidence=%.3f is below threshold %.2f; flagging REVIEW",
+                        avg_crit_conf, _MIN_CONFIDENCE,
+                    )
+                    quality = "REVIEW"
 
         if quality == "OK":
             # Aspect ratio check
@@ -173,9 +196,16 @@ def _check_data_quality(
                     abs(ratio - std) / std <= _ASPECT_TOLERANCE
                     for std in _STANDARD_RATIOS
                 ):
+                    logger.warning(
+                        "_check_data_quality: aspect_ratio=%.3f is non-standard (not within %.0f%% of 16:9, 4:3, or 3:2); flagging REVIEW",
+                        ratio, _ASPECT_TOLERANCE * 100,
+                    )
                     quality = "REVIEW"
 
     if has_implausible_metric:
+        logger.warning(
+            "_check_data_quality: implausible metric detected; appending IMPLAUSIBLE_METRIC",
+        )
         quality = f"{quality}|IMPLAUSIBLE_METRIC"
 
     return quality
@@ -218,12 +248,22 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         valid_hka = valid_ha & ~np.isnan(knee_y)
 
         # Check 1: ankle below hip
-        if _fail_ratio(ankle_y < hip_y, valid_ha) > _MAX_IMPLAUSIBLE_RATIO:
+        fail_r = _fail_ratio(ankle_y < hip_y, valid_ha)
+        if fail_r > _MAX_IMPLAUSIBLE_RATIO:
+            logger.warning(
+                "validate_pose_plausibility: %s ankle above hip in %.1f%% of frames (threshold %.1f%%)",
+                side, fail_r * 100, _MAX_IMPLAUSIBLE_RATIO * 100,
+            )
             return False
 
         # Check 2: knee vertically between hip and ankle
         knee_ok = (knee_y > hip_y) & (knee_y < ankle_y)
-        if _fail_ratio(~knee_ok, valid_hka) > _MAX_IMPLAUSIBLE_RATIO:
+        fail_r = _fail_ratio(~knee_ok, valid_hka)
+        if fail_r > _MAX_IMPLAUSIBLE_RATIO:
+            logger.warning(
+                "validate_pose_plausibility: %s knee outside hip-ankle range in %.1f%% of frames (threshold %.1f%%)",
+                side, fail_r * 100, _MAX_IMPLAUSIBLE_RATIO * 100,
+            )
             return False
 
     # Check 3: upper-limb vertical chain
@@ -236,7 +276,12 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         lower = np.minimum(shoulder_y, wrist_y)
         upper = np.maximum(shoulder_y, wrist_y)
         elbow_ok = (elbow_y >= lower) & (elbow_y <= upper)
-        if _fail_ratio(~elbow_ok, valid_sew) > _MAX_IMPLAUSIBLE_RATIO:
+        fail_r = _fail_ratio(~elbow_ok, valid_sew)
+        if fail_r > _MAX_IMPLAUSIBLE_RATIO:
+            logger.warning(
+                "validate_pose_plausibility: %s elbow outside shoulder-wrist range in %.1f%% of frames (threshold %.1f%%)",
+                side, fail_r * 100, _MAX_IMPLAUSIBLE_RATIO * 100,
+            )
             return False
 
     # Check 4: left joints must not be consistently to the right of right joints
@@ -258,7 +303,12 @@ def validate_pose_plausibility(df: pd.DataFrame) -> bool:
         left_mean = df[left_x_cols].mean(axis=1).to_numpy(dtype=float)
         right_mean = df[right_x_cols].mean(axis=1).to_numpy(dtype=float)
         valid_lr = ~(np.isnan(left_mean) | np.isnan(right_mean))
-        if _fail_ratio(left_mean > right_mean, valid_lr) > _MAX_IMPLAUSIBLE_RATIO:
+        fail_r = _fail_ratio(left_mean > right_mean, valid_lr)
+        if fail_r > _MAX_IMPLAUSIBLE_RATIO:
+            logger.warning(
+                "validate_pose_plausibility: left joints right of right joints in %.1f%% of frames (threshold %.1f%%) — possible mirrored pose",
+                fail_r * 100, _MAX_IMPLAUSIBLE_RATIO * 100,
+            )
             return False
 
     return True
@@ -380,21 +430,51 @@ def process_video(
         )
         quality = _check_data_quality(df, video_path, has_implausible_metric=has_implausible)
         if not plausible:
+            logger.warning(
+                "process_video: %s: appending IMPLAUSIBLE_POSE flag",
+                video_path.name,
+            )
             quality = f"{quality}|IMPLAUSIBLE_POSE"
         if arm_metrics["cross_body_swing"]:
+            logger.warning(
+                "process_video: %s: appending CROSS_BODY_ARM_SWING flag",
+                video_path.name,
+            )
             quality = f"{quality}|CROSS_BODY_ARM_SWING"
         if stride_metrics.get("has_long_tracking_gap"):
+            logger.warning(
+                "process_video: %s: appending LONG_TRACKING_GAP flag",
+                video_path.name,
+            )
             quality = f"{quality}|LONG_TRACKING_GAP"
         if _cal_fallback:
+            logger.warning(
+                "process_video: %s: appending CALIBRATION_FALLBACK flag",
+                video_path.name,
+            )
             segments = quality.split("|")
             if segments[0] == "OK":
                 segments[0] = "REVIEW"
             quality = "|".join(segments) + "|CALIBRATION_FALLBACK"
+        if quality.split("|")[0] == "REVIEW":
+            logger.warning(
+                "process_video: %s: final data_quality=%s",
+                video_path.name, quality,
+            )
+        else:
+            logger.info(
+                "process_video: %s: final data_quality=%s",
+                video_path.name, quality,
+            )
         row["data_quality"] = quality
 
         return row, "ok", None
 
     except (cv2.error, FileNotFoundError, RuntimeError) as exc:
+        logger.error(
+            "process_video: %s: unhandled exception: %s",
+            video_path.name, exc,
+        )
         return row, "error", str(exc)
 
 
