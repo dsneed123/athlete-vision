@@ -415,3 +415,60 @@ class TestNanGapDetection:
         right_strides = [s for s in result["strides"] if s["foot"] == "right"]
         assert left_strides == []
         assert len(right_strides) > 0
+
+
+# ---------------------------------------------------------------------------
+# Plausibility bounds
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeStridesBounds:
+    def test_in_bounds_result_not_flagged(self):
+        """Normal gait within all bounds does not set has_implausible_metric."""
+        df = _gait_pattern(n_strides=3, fps=30.0, contact_frames=5, swing_frames=10, x_step=0.1)
+        # calibration_factor=10 → stride_length = 0.1 * 10 = 1.0 m (within [0.1, 3.5])
+        result = analyze_strides(df, calibration_factor=10.0, ground_threshold=0.8)
+        assert result["has_implausible_metric"] is False
+        assert not math.isnan(result["stride_length"])
+
+    def test_stride_length_too_small_set_to_nan(self):
+        """stride_length < 0.1 m is out of bounds → NaN + flag."""
+        # x_step=0.001, calibration_factor=1 → stride_length = 0.001 m < 0.1
+        df = _gait_pattern(n_strides=3, fps=30.0, contact_frames=5, swing_frames=10, x_step=0.001)
+        result = analyze_strides(df, calibration_factor=1.0, ground_threshold=0.8)
+        assert math.isnan(result["stride_length"])
+        assert result["has_implausible_metric"] is True
+
+    def test_stride_length_too_large_set_to_nan(self):
+        """stride_length > 3.5 m is out of bounds → NaN + flag."""
+        # x_step=0.5, calibration_factor=10 → stride_length = 5.0 m > 3.5
+        df = _gait_pattern(n_strides=3, fps=30.0, contact_frames=5, swing_frames=10, x_step=0.5)
+        result = analyze_strides(df, calibration_factor=10.0, ground_threshold=0.8)
+        assert math.isnan(result["stride_length"])
+        assert result["has_implausible_metric"] is True
+
+    def test_stride_frequency_too_low_set_to_nan(self):
+        """Very slow stride frequency < 0.5 Hz → NaN + flag.
+
+        At fps=30, contact=5, swing=100 → stride_duration = 105/30 ≈ 3.5 s
+        → frequency ≈ 0.286 Hz < 0.5 Hz.
+        """
+        df = _gait_pattern(n_strides=2, fps=30.0, contact_frames=5, swing_frames=100, x_step=0.1)
+        result = analyze_strides(df, calibration_factor=10.0, ground_threshold=0.8)
+        assert math.isnan(result["stride_frequency"])
+        assert result["has_implausible_metric"] is True
+
+    def test_stride_frequency_too_high_set_to_nan(self):
+        """Very fast stride frequency > 5.0 Hz → NaN + flag.
+
+        At fps=30, contact=1, swing=1 → stride_duration = 2/30 ≈ 0.067 s
+        → frequency ≈ 15 Hz > 5.0 Hz.
+        """
+        df = _gait_pattern(n_strides=4, fps=30.0, contact_frames=1, swing_frames=1, x_step=0.1)
+        result = analyze_strides(df, calibration_factor=1.0, ground_threshold=0.8)
+        assert math.isnan(result["stride_frequency"])
+        assert result["has_implausible_metric"] is True
+
+    def test_empty_df_has_implausible_false(self):
+        """Empty DataFrame returns has_implausible_metric=False (no bounds triggered)."""
+        result = analyze_strides(pd.DataFrame())
+        assert result["has_implausible_metric"] is False

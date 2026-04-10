@@ -136,6 +136,7 @@ class TestAnalyzeVelocityEdgeCases:
             "peak_velocity_ms",
             "avg_velocity_ms",
             "forty_time",
+            "has_implausible_metric",
         }
         assert set(result.keys()) == expected_keys
 
@@ -207,3 +208,37 @@ class TestAnalyzeVelocityMetrics:
         # Both should return finite, positive values for a constant-velocity run
         assert not math.isnan(r1["peak_velocity_ms"])
         assert not math.isnan(r5["peak_velocity_ms"])
+
+    def test_in_bounds_result_not_flagged(self):
+        """Normal run within [0, 30] mph does not set has_implausible_metric."""
+        df = _constant_velocity_df(velocity_norm=0.01)
+        result = analyze_velocity(df, calibration_factor=10.0)
+        assert result["has_implausible_metric"] is False
+        assert not math.isnan(result["peak_velocity_mph"])
+
+
+# ---------------------------------------------------------------------------
+# analyze_velocity – plausibility bounds
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeVelocityBounds:
+    def test_negative_peak_velocity_set_to_nan(self):
+        """Negative calibration_factor produces negative velocity → clamped to NaN."""
+        df = _constant_velocity_df(velocity_norm=0.01, n_frames=120)
+        result = analyze_velocity(df, calibration_factor=-10.0)
+        assert math.isnan(result["peak_velocity_mph"])
+        assert result["has_implausible_metric"] is True
+
+    def test_above_30mph_set_to_nan(self):
+        """Unrealistically high calibration factor forces peak_velocity_mph > 30."""
+        # velocity_norm=0.05 at fps=30 → inst velocity = 0.05 * 30 = 1.5 norm/s
+        # calibration_factor=1000 → ~1500 m/s → ~3356 mph — way over 30
+        df = _constant_velocity_df(velocity_norm=0.05, n_frames=120)
+        result = analyze_velocity(df, calibration_factor=1000.0)
+        assert math.isnan(result["peak_velocity_mph"])
+        assert result["has_implausible_metric"] is True
+
+    def test_empty_df_has_implausible_false(self):
+        """Empty DataFrame returns has_implausible_metric=False (no bounds triggered)."""
+        result = analyze_velocity(pd.DataFrame())
+        assert result["has_implausible_metric"] is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -10,6 +11,10 @@ import pandas as pd
 # Plausible 40-yard dash range (seconds)
 _TIME_MIN = 3.5
 _TIME_MAX = 6.5
+
+# Plausibility bounds for velocity metrics
+_PEAK_VELOCITY_MPH_MIN = 0.0
+_PEAK_VELOCITY_MPH_MAX = 30.0
 
 # Default calibration: 40 yards = 36.576 metres.  Without a real calibration
 # the caller should supply calibration_factor derived from a known reference.
@@ -94,6 +99,7 @@ def analyze_velocity(
         "peak_velocity_ms": float("nan"),
         "avg_velocity_ms": float("nan"),
         "forty_time": float("nan"),
+        "has_implausible_metric": False,
     }
 
     if df.empty:
@@ -127,6 +133,16 @@ def analyze_velocity(
     peak_ms = float(np.nanmax(smoothed)) if len(smoothed) > 0 else float("nan")
     peak_mph = peak_ms * 2.23694  # m/s → mph
 
+    # Post-calculation plausibility bounds
+    has_implausible = False
+    if not math.isnan(peak_mph) and not (_PEAK_VELOCITY_MPH_MIN <= peak_mph <= _PEAK_VELOCITY_MPH_MAX):
+        logging.warning(
+            "velocity_analyzer: peak_velocity_mph=%.4g is outside plausible range [%g, %g]; setting to NaN",
+            peak_mph, _PEAK_VELOCITY_MPH_MIN, _PEAK_VELOCITY_MPH_MAX,
+        )
+        peak_mph = float("nan")
+        has_implausible = True
+
     # Average velocity over the movement window
     window = _detect_movement_window(hip_x)
     if window is not None:
@@ -152,4 +168,5 @@ def analyze_velocity(
         "peak_velocity_ms": peak_ms,
         "avg_velocity_ms": avg_ms,
         "forty_time": forty_time,
+        "has_implausible_metric": has_implausible,
     }

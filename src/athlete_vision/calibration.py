@@ -5,8 +5,27 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
+
+
+class CalibrationResult(NamedTuple):
+    """Return type for :func:`calibrate`.
+
+    Attributes
+    ----------
+    factor:
+        Calibration factor: metres per one normalised x-coordinate unit.
+    fallback_used:
+        ``True`` when no calibration source was available and the default
+        pixel-scale factor of ``1.0`` was applied.  Distance-derived metrics
+        (stride_length, peak_velocity_mph) will be in raw normalised units
+        rather than metres when this is ``True``.
+    """
+
+    factor: float
+    fallback_used: bool
 
 import cv2
 import numpy as np
@@ -102,7 +121,7 @@ def detect_yard_lines(
     hough_threshold: int = 80,
     min_line_length_ratio: float = 0.15,
     max_line_gap: int = 20,
-    min_lines: int = 2,
+    min_lines: int = 3,
     cluster_tolerance: float = 0.05,
 ) -> float | None:
     """Attempt to auto-detect yard line markings and return a calibration factor.
@@ -132,6 +151,8 @@ def detect_yard_lines(
         Maximum allowed gap (pixels) inside a line segment.
     min_lines:
         Minimum number of distinct line clusters required to return a result.
+        Defaults to 3 because two clusters yield only one spacing measurement
+        (two points define any line), which is not reliable enough.
     cluster_tolerance:
         Two line positions closer than this fraction of the frame width are
         merged into one cluster.
@@ -241,6 +262,25 @@ def detect_yard_lines(
             )
             return None
 
+        # Sanity-check: spacing must be physically plausible for yard lines
+        spacing_px = mean_spacing * frame_width
+        if spacing_px < 5.0:
+            logger.warning(
+                "detect_yard_lines: detected line spacing (%.1f px) is implausibly "
+                "small in %s; likely noise — returning None",
+                spacing_px,
+                video_path,
+            )
+            return None
+        if mean_spacing > 0.4:
+            logger.warning(
+                "detect_yard_lines: detected line spacing (%.1f%% of frame width) is "
+                "implausibly large in %s; unlikely to be yard lines — returning None",
+                mean_spacing * 100,
+                video_path,
+            )
+            return None
+
         # Assume inter-line spacing = 10 yards = 9.144 m
         return _TEN_YARDS_M / mean_spacing
 
@@ -256,7 +296,7 @@ def calibrate(
     frame_span: float | None = None,
     auto_detect: bool = True,
 ) -> float:
-    """Return a calibration factor (metres per normalised x-unit).
+    """Return the calibration factor (metres per normalised x-coordinate unit).
 
     Resolution order (first match wins):
 
@@ -285,7 +325,7 @@ def calibrate(
     -------
     float
         Calibration factor: metres per one normalised x-coordinate unit.
-        Returns ``1.0`` when no calibration source is available.
+        Returns ``1.0`` when no calibration source is available (fallback).
     """
     # 1. Explicit user reference
     if calibration_distance is not None:
@@ -299,4 +339,11 @@ def calibrate(
             return factor
 
     # 3. Default — normalised units unchanged
+    _video_hint = f" for {Path(video_path).name!r}" if video_path is not None else ""
+    logger.warning(
+        "calibrate: no calibration source available%s; "
+        "using scale factor 1.0 — distance metrics (stride_length, "
+        "peak_velocity_mph) will be in raw normalised units, not metres",
+        _video_hint,
+    )
     return 1.0

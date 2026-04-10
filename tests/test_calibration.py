@@ -222,6 +222,71 @@ class TestDetectYardLines:
         assert result is None
         mock_logger.warning.assert_called()
 
+    def test_returns_none_for_fewer_than_3_clusters(self):
+        """Only 2 distinct clusters → return None (default min_lines=3)."""
+        cap = _make_cap_mock(frame_width=640.0, frame_height=480.0)
+        # Two vertical line clusters at x=100 and x=450 (normalised 0.156 and 0.703)
+        two_cluster_lines = np.array([
+            [[100, 0, 100, 200]],
+            [[100, 5, 100, 205]],
+            [[100, 10, 100, 210]],
+            [[450, 0, 450, 200]],
+            [[450, 5, 450, 205]],
+            [[450, 10, 450, 210]],
+        ])
+        with patch("athlete_vision.calibration.cv2.VideoCapture", return_value=cap), \
+             patch("athlete_vision.calibration.cv2.HoughLinesP", return_value=two_cluster_lines), \
+             patch("athlete_vision.calibration.logger") as mock_logger:
+            result = detect_yard_lines("dummy.mp4")  # default min_lines=3
+        assert result is None
+        mock_logger.warning.assert_called()
+
+    def test_returns_none_when_spacing_below_5px(self):
+        """Inter-cluster spacing < 5 px → return None (implausibly small)."""
+        cap = _make_cap_mock(frame_width=640.0, frame_height=480.0)
+        # Three clusters at x=64, 68, 72 (normalised 0.1, 0.106, 0.113)
+        # spacing ~3.8 px < 5 px; use cluster_tolerance=0.001 to keep them separate
+        tiny_gap_lines = np.array([
+            [[64, 0, 64, 200]],
+            [[64, 5, 64, 205]],
+            [[64, 10, 64, 210]],
+            [[68, 0, 68, 200]],
+            [[68, 5, 68, 205]],
+            [[68, 10, 68, 210]],
+            [[72, 0, 72, 200]],
+            [[72, 5, 72, 205]],
+            [[72, 10, 72, 210]],
+        ])
+        with patch("athlete_vision.calibration.cv2.VideoCapture", return_value=cap), \
+             patch("athlete_vision.calibration.cv2.HoughLinesP", return_value=tiny_gap_lines), \
+             patch("athlete_vision.calibration.logger") as mock_logger:
+            result = detect_yard_lines("dummy.mp4", min_lines=3, cluster_tolerance=0.001)
+        assert result is None
+        mock_logger.warning.assert_called()
+
+    def test_returns_none_when_spacing_above_40_percent_frame_width(self):
+        """Inter-cluster spacing > 40% of frame width → return None (implausibly large)."""
+        cap = _make_cap_mock(frame_width=640.0, frame_height=480.0)
+        # Three clusters at x=64 (10%), x=352 (55%), x=608 (95%)
+        # spacings: 0.45 and 0.40 → mean 0.425 > 0.40
+        wide_gap_lines = np.array([
+            [[64, 0, 64, 200]],
+            [[64, 5, 64, 205]],
+            [[64, 10, 64, 210]],
+            [[352, 0, 352, 200]],
+            [[352, 5, 352, 205]],
+            [[352, 10, 352, 210]],
+            [[608, 0, 608, 200]],
+            [[608, 5, 608, 205]],
+            [[608, 10, 608, 210]],
+        ])
+        with patch("athlete_vision.calibration.cv2.VideoCapture", return_value=cap), \
+             patch("athlete_vision.calibration.cv2.HoughLinesP", return_value=wide_gap_lines), \
+             patch("athlete_vision.calibration.logger") as mock_logger:
+            result = detect_yard_lines("dummy.mp4", min_lines=3)
+        assert result is None
+        mock_logger.warning.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # calibrate — main entry point
