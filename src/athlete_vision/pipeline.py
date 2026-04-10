@@ -290,7 +290,7 @@ def process_video(
 
         return row, "ok", None
 
-    except (cv2.error, FileNotFoundError) as exc:
+    except (cv2.error, FileNotFoundError, RuntimeError) as exc:
         return row, "error", str(exc)
 
 

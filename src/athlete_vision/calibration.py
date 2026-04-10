@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
@@ -194,6 +197,13 @@ def detect_yard_lines(
                     all_x_positions.append(x_mid)
 
         if len(all_x_positions) < min_lines:
+            logger.warning(
+                "detect_yard_lines: insufficient near-vertical lines found in %s "
+                "(found %d, need %d); falling back to scale factor 1.0",
+                video_path,
+                len(all_x_positions),
+                min_lines,
+            )
             return None
 
         # Cluster nearby x-positions into distinct yard lines
@@ -210,6 +220,13 @@ def detect_yard_lines(
         clusters.append(current)
 
         if len(clusters) < min_lines:
+            logger.warning(
+                "detect_yard_lines: too few distinct yard-line clusters in %s "
+                "(found %d, need %d); falling back to scale factor 1.0",
+                video_path,
+                len(clusters),
+                min_lines,
+            )
             return None
 
         cluster_centres = [float(np.mean(c)) for c in clusters]
@@ -217,6 +234,11 @@ def detect_yard_lines(
         mean_spacing = float(np.mean(spacings))
 
         if mean_spacing <= 0:
+            logger.warning(
+                "detect_yard_lines: computed non-positive inter-line spacing for %s; "
+                "falling back to scale factor 1.0",
+                video_path,
+            )
             return None
 
         # Assume inter-line spacing = 10 yards = 9.144 m

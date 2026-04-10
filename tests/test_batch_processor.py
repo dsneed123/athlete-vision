@@ -440,6 +440,20 @@ class TestBatchProcess:
 
         assert len(df) == 1
 
+    def test_bad_metadata_json_emits_warning(self, tmp_path):
+        self._write_videos(tmp_path, ["a.mp4"])
+        (tmp_path / "metadata.json").write_text("not valid json{{")
+        output = tmp_path / "out.csv"
+
+        with patch("athlete_vision.batch_processor.process_single_video",
+                   side_effect=self._stub_process_single), \
+             patch("athlete_vision.batch_processor.logger") as mock_logger:
+            batch_process(tmp_path, output)
+
+        mock_logger.warning.assert_called_once()
+        args = mock_logger.warning.call_args[0]
+        assert "metadata" in str(args[1]).lower() or "metadata" in str(args).lower()
+
 
 # ---------------------------------------------------------------------------
 # print_summary

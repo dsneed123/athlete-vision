@@ -263,12 +263,19 @@ def _create_skeleton_video(src_path: str, pose_df: pd.DataFrame, dst_path: str) 
             row = rows.iloc[0]
 
             def _pt(name: str) -> tuple[int, int] | None:
-                vis = float(row.get(f"{name}_visibility", 0.0) or 0.0)
-                if vis < _VIS_THRESHOLD:
+                vis_raw = row.get(f"{name}_visibility", 0.0)
+                if vis_raw is None or (isinstance(vis_raw, float) and math.isnan(vis_raw)):
                     return None
-                px = int(float(row.get(f"{name}_x", 0.0) or 0.0) * w)
-                py = int(float(row.get(f"{name}_y", 0.0) or 0.0) * h)
-                return (px, py)
+                if float(vis_raw) < _VIS_THRESHOLD:
+                    return None
+                x_raw = row.get(f"{name}_x", 0.0)
+                y_raw = row.get(f"{name}_y", 0.0)
+                if x_raw is None or y_raw is None:
+                    return None
+                x_f, y_f = float(x_raw), float(y_raw)
+                if math.isnan(x_f) or math.isnan(y_f):
+                    return None
+                return (int(x_f * w), int(y_f * h))
 
             for a_name, b_name in _SKELETON:
                 pa, pb = _pt(a_name), _pt(b_name)
@@ -994,8 +1001,10 @@ def _page_webcam() -> None:
         estimator = PoseEstimator(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
         tmp_path = tempfile.mktemp(suffix=".mp4")
+        skel_path = tempfile.mktemp(suffix="_skeleton.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+        skel_writer = cv2.VideoWriter(skel_path, fourcc, fps, (w, h))
 
         total_frames = int(fps * duration)
         frame_count = 0
@@ -1010,11 +1019,14 @@ def _page_webcam() -> None:
             timestamp_ms = int(frame_count * 1000.0 / fps)
             landmarks = estimator.process_frame(frame, timestamp_ms)
 
-            # Draw skeleton overlay on a copy for display
+            # Draw skeleton overlay on a copy for display and recording
             display_frame = frame.copy()
             angles = {}
             if landmarks:
                 display_frame, angles = _draw_live_skeleton(display_frame, landmarks, w, h)
+
+            # Write skeleton-overlay frame to second video
+            skel_writer.write(display_frame)
 
             frame_count += 1
 
@@ -1032,14 +1044,19 @@ def _page_webcam() -> None:
         estimator.close()
         cap.release()
         writer.release()
+        skel_writer.release()
         frame_display.empty()
         angle_display.empty()
         progress_bar.progress(1.0)
         status_txt.text(f"Recorded {frame_count} frames. Running full analysis...")
 
-        # Read the recorded video bytes
+        # Read both video files
         with open(tmp_path, "rb") as f:
             video_bytes = f.read()
+        with open(skel_path, "rb") as f:
+            skeleton_video_bytes = f.read()
+        Path(skel_path).unlink(missing_ok=True)
+        st.session_state["webcam_skeleton_video"] = skeleton_video_bytes
 
         # Run full analysis pipeline
         progress_bar2 = st.progress(0.0)
@@ -1081,14 +1098,29 @@ def _page_webcam() -> None:
         )
         return
 
+    # Show skeleton replay video
+    skel_video = st.session_state.get("webcam_skeleton_video", b"")
+    if skel_video:
+        st.subheader("Skeleton Overlay Recording")
+        st.video(skel_video)
+
     _show_results(metrics, pose_df, video_bytes, "webcam_recording.mp4")
 
-    # Download recorded video
+    # Download buttons
+    st.divider()
+    dl_col1, dl_col2 = st.columns(2)
+    if skel_video:
+        dl_col1.download_button(
+            "Download skeleton overlay video",
+            data=skel_video,
+            file_name="athlete_vision_skeleton.mp4",
+            mime="video/mp4",
+        )
     if video_bytes:
-        st.download_button(
-            "Download recorded video",
+        dl_col2.download_button(
+            "Download raw recording",
             data=video_bytes,
-            file_name="athlete_vision_recording.mp4",
+            file_name="athlete_vision_raw.mp4",
             mime="video/mp4",
         )
 

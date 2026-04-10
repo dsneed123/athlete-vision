@@ -213,6 +213,15 @@ class TestDetectYardLines:
             detect_yard_lines("dummy.mp4")
         cap.release.assert_called_once()
 
+    def test_warning_emitted_when_no_lines_detected(self):
+        """A warning must be logged when Hough detection finds no yard lines."""
+        cap = _make_cap_mock()  # blank frames → no lines found
+        with patch("athlete_vision.calibration.cv2.VideoCapture", return_value=cap), \
+             patch("athlete_vision.calibration.logger") as mock_logger:
+            result = detect_yard_lines("dummy.mp4")
+        assert result is None
+        mock_logger.warning.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # calibrate — main entry point
