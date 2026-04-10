@@ -198,6 +198,10 @@ def process_single_video(
     video_path: Path,
     metadata: dict,
     model_complexity: int = 1,
+    *,
+    min_frames: int = 100,
+    max_tracking_loss_ratio: float = 0.10,
+    min_avg_confidence: float = 0.85,
 ) -> dict:
     """Run the full analysis pipeline on one video file.
 
@@ -210,6 +214,14 @@ def process_single_video(
         athlete_name, known_time (seconds).
     model_complexity:
         MediaPipe model complexity: 0 (lite), 1 (full), 2 (heavy).
+    min_frames:
+        Minimum number of frames required; shorter clips are flagged.
+    max_tracking_loss_ratio:
+        Maximum fraction of frames where any critical joint is NaN before
+        flagging.
+    min_avg_confidence:
+        Minimum average MediaPipe visibility for critical joints; below this
+        triggers flagging.
 
     Returns
     -------
@@ -247,6 +259,31 @@ def process_single_video(
 
         if df.empty:
             result["status"] = "no_pose"
+            return result
+
+        # --- Data-quality checks ---
+        if len(df) < min_frames:
+            result["status"] = "flagged"
+            return result
+
+        _CRIT_JOINTS = [
+            "left_hip", "right_hip", "left_knee",
+            "right_knee", "left_ankle", "right_ankle",
+        ]
+        crit_x_cols = [f"{j}_x" for j in _CRIT_JOINTS if f"{j}_x" in df.columns]
+        if crit_x_cols:
+            loss_ratio = float(df[crit_x_cols].isna().any(axis=1).mean())
+            if loss_ratio > max_tracking_loss_ratio:
+                result["status"] = "flagged"
+                return result
+
+        avg_conf: dict = df.attrs.get("avg_confidence", {})
+        crit_confs = [
+            v for k, v in avg_conf.items()
+            if k in set(_CRIT_JOINTS) and not math.isnan(v)
+        ]
+        if crit_confs and (sum(crit_confs) / len(crit_confs)) < min_avg_confidence:
+            result["status"] = "flagged"
             return result
 
         stride_metrics = analyze_strides(df)
@@ -289,12 +326,33 @@ def batch_process(
     video_dir: Path,
     output_csv: Path,
     model_complexity: int = 1,
+    *,
+    min_frames: int = 100,
+    max_tracking_loss_ratio: float = 0.10,
+    min_avg_confidence: float = 0.85,
 ) -> pd.DataFrame:
     """Process every video in *video_dir* through the full pipeline.
 
     Reads ``metadata.json`` from *video_dir* when present to obtain known
     40-yard dash times and athlete names.  Writes results to *output_csv*
     and returns the DataFrame.
+
+    Parameters
+    ----------
+    video_dir:
+        Directory containing video files.
+    output_csv:
+        Destination path for the output CSV.
+    model_complexity:
+        MediaPipe model complexity: 0 (lite), 1 (full), 2 (heavy).
+    min_frames:
+        Minimum number of frames required; shorter clips are flagged.
+    max_tracking_loss_ratio:
+        Maximum fraction of frames where any critical joint is NaN before
+        flagging.
+    min_avg_confidence:
+        Minimum average MediaPipe visibility for critical joints; below this
+        triggers flagging.
 
     Raises
     ------
@@ -331,7 +389,12 @@ def batch_process(
     for video_path in video_files:
         meta = _lookup_metadata(video_path.name, metadata_by_id)
         print(f"  Processing {video_path.name} ...", end="", flush=True)
-        result = process_single_video(video_path, meta, model_complexity)
+        result = process_single_video(
+            video_path, meta, model_complexity,
+            min_frames=min_frames,
+            max_tracking_loss_ratio=max_tracking_loss_ratio,
+            min_avg_confidence=min_avg_confidence,
+        )
         print(f" [{result['status']}]")
         results.append(result)
 

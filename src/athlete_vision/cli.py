@@ -222,7 +222,35 @@ def download_cmd(count: int, output_dir: str, model_complexity: int) -> None:
     type=click.IntRange(0, 2),
     help="MediaPipe model complexity (0=lite, 1=full, 2=heavy).",
 )
-def batch_cmd(video_dir: str, output: str, model_complexity: int) -> None:
+@click.option(
+    "--min-frames",
+    default=100,
+    show_default=True,
+    type=int,
+    help="Minimum frame count; shorter clips are flagged.",
+)
+@click.option(
+    "--max-tracking-loss",
+    default=0.10,
+    show_default=True,
+    type=float,
+    help="Maximum fraction of frames with a critical joint NaN before flagging.",
+)
+@click.option(
+    "--min-confidence",
+    default=0.85,
+    show_default=True,
+    type=float,
+    help="Minimum average MediaPipe visibility for critical joints before flagging.",
+)
+def batch_cmd(
+    video_dir: str,
+    output: str,
+    model_complexity: int,
+    min_frames: int,
+    max_tracking_loss: float,
+    min_confidence: float,
+) -> None:
     """Batch process videos and validate extracted 40-yard dash times.
 
     Runs pose estimation, stride analysis, angle calculations, velocity, and
@@ -236,7 +264,14 @@ def batch_cmd(video_dir: str, output: str, model_complexity: int) -> None:
     click.echo(f"Processing videos in {video_dir_path} ...")
 
     try:
-        df = batch_process(video_dir_path, output_path, model_complexity)
+        df = batch_process(
+            video_dir_path,
+            output_path,
+            model_complexity,
+            min_frames=min_frames,
+            max_tracking_loss_ratio=max_tracking_loss,
+            min_avg_confidence=min_confidence,
+        )
     except FileNotFoundError as exc:
         click.echo(str(exc), err=True)
         sys.exit(1)
@@ -304,6 +339,27 @@ def web_cmd(port: int) -> None:
     type=click.Choice(["yards", "meters", "feet"], case_sensitive=False),
     help="Unit for --calibration-distance.",
 )
+@click.option(
+    "--min-frames",
+    default=100,
+    show_default=True,
+    type=int,
+    help="Minimum frame count; shorter clips are flagged REVIEW.",
+)
+@click.option(
+    "--max-tracking-loss",
+    default=0.10,
+    show_default=True,
+    type=float,
+    help="Maximum fraction of frames with a critical joint NaN before REVIEW.",
+)
+@click.option(
+    "--min-confidence",
+    default=0.85,
+    show_default=True,
+    type=float,
+    help="Minimum average MediaPipe visibility for critical joints before REVIEW.",
+)
 def pipeline_cmd(
     video_dir: str,
     output: str,
@@ -311,6 +367,9 @@ def pipeline_cmd(
     model_complexity: int,
     calibration_distance: float | None,
     calibration_unit: str,
+    min_frames: int,
+    max_tracking_loss: float,
+    min_confidence: float,
 ) -> None:
     """Run the full analysis pipeline on a directory of videos.
 
@@ -351,6 +410,9 @@ def pipeline_cmd(
             model_complexity=model_complexity,
             athlete_id=athlete_id,
             calibration_factor=cal_factor,
+            min_frames=min_frames,
+            max_tracking_loss_ratio=max_tracking_loss,
+            min_avg_confidence=min_confidence,
         )
     except FileNotFoundError as exc:
         click.echo(str(exc), err=True)
