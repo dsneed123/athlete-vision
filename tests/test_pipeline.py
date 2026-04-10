@@ -312,7 +312,7 @@ class TestProcessVideoImplausiblePose:
 
         assert status == "ok"
         assert error is None
-        assert "IMPLAUSIBLE_POSE" in row["data_quality"]
+        assert row["data_quality"] == "OK|IMPLAUSIBLE_POSE"
 
     def test_implausible_pose_appended_to_review_quality(self, tmp_path):
         """IMPLAUSIBLE_POSE is appended to REVIEW when both conditions hold."""
@@ -326,8 +326,7 @@ class TestProcessVideoImplausiblePose:
         with patch("athlete_vision.pipeline._check_data_quality", return_value="REVIEW"):
             row, _, _ = process_video(video, "athlete_1", estimator)
 
-        assert "REVIEW" in row["data_quality"]
-        assert "IMPLAUSIBLE_POSE" in row["data_quality"]
+        assert row["data_quality"] == "REVIEW|IMPLAUSIBLE_POSE"
 
     def test_plausible_pose_leaves_quality_unchanged(self, tmp_path):
         """A plausible pose must not add IMPLAUSIBLE_POSE to data_quality."""
@@ -531,6 +530,38 @@ class TestRunPipeline:
         assert stats["flagged"] == 1     # only the flagged one
         assert stats["failed"] == 1      # error video
 
+    def test_stats_flagged_counts_review_with_implausible_pose(self, tmp_path):
+        """REVIEW|IMPLAUSIBLE_POSE must count as flagged in stats."""
+        self._write_videos(tmp_path, ["a.mp4", "b.mp4"])
+        output = tmp_path / "out.csv"
+
+        def stub(video_path, athlete_id, estimator, **kwargs):
+            row = self._stub_process_video(video_path, athlete_id, estimator)[0]
+            row["data_quality"] = "REVIEW|IMPLAUSIBLE_POSE"
+            return row, "ok", None
+
+        with patch("athlete_vision.pipeline.PoseEstimator", return_value=_make_pose_estimator_stub(pd.DataFrame())), \
+             patch("athlete_vision.pipeline.process_video", side_effect=stub):
+            _, stats = run_pipeline(tmp_path, output)
+
+        assert stats["flagged"] == 2
+
+    def test_stats_ok_with_implausible_pose_not_counted_as_review(self, tmp_path):
+        """OK|IMPLAUSIBLE_POSE must not be counted as a REVIEW-flagged row."""
+        self._write_videos(tmp_path, ["a.mp4"])
+        output = tmp_path / "out.csv"
+
+        def stub(video_path, athlete_id, estimator, **kwargs):
+            row = self._stub_process_video(video_path, athlete_id, estimator)[0]
+            row["data_quality"] = "OK|IMPLAUSIBLE_POSE"
+            return row, "ok", None
+
+        with patch("athlete_vision.pipeline.PoseEstimator", return_value=_make_pose_estimator_stub(pd.DataFrame())), \
+             patch("athlete_vision.pipeline.process_video", side_effect=stub):
+            _, stats = run_pipeline(tmp_path, output)
+
+        assert stats["flagged"] == 0
+
     def test_athlete_id_fallback_to_stem(self, tmp_path):
         self._write_videos(tmp_path, ["myvideo.mp4"])
         output = tmp_path / "out.csv"
@@ -657,3 +688,20 @@ class TestPrintPipelineSummary:
         print_pipeline_summary(df, {"processed": 4, "flagged": 0, "failed": 0})
         out = capsys.readouterr().out
         assert "mph" not in out
+
+    def test_shows_implausible_pose_count_when_present(self, capsys):
+        data = {col: [float("nan")] * 3 for col in _OUTPUT_COLUMNS}
+        data["athlete_id"] = ["a0", "a1", "a2"]
+        data["video_filename"] = ["v0.mp4", "v1.mp4", "v2.mp4"]
+        data["data_quality"] = ["OK", "OK|IMPLAUSIBLE_POSE", "REVIEW|IMPLAUSIBLE_POSE"]
+        df = pd.DataFrame(data)
+        print_pipeline_summary(df, {"processed": 3, "flagged": 1, "failed": 0})
+        out = capsys.readouterr().out
+        assert "Implausible pose" in out
+        assert "2" in out
+
+    def test_no_implausible_pose_line_when_none(self, capsys):
+        df = self._make_df()  # all data_quality are "OK"
+        print_pipeline_summary(df, {"processed": 4, "flagged": 0, "failed": 0})
+        out = capsys.readouterr().out
+        assert "Implausible pose" not in out
